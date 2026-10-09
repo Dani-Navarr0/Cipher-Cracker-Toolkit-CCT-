@@ -7,6 +7,7 @@ import random
 import math
 import time
 from collections import Counter
+from ngram_scoring import DEFAULT_NGRAM_PATH, DEFAULT_NGRAM_SIZE, load_ngram_scores, resolve_ngram_path, score_text
 
 # --- DUMMY UTILS CLASS ---
 class DummyUtils:
@@ -58,40 +59,15 @@ utils = DummyUtils()
 RESET, GREEN, YELLOW, RED, BLUE, CYAN, GREY = '\033[0m', '\033[32m', '\033[33m', '\033[31m', '\033[34m', '\033[36m', '\033[90m'
 
 data_dir = os.path.join(os.path.dirname(__file__), "data")
-bigram_freq_path = os.path.join(data_dir, "english_bigrams.txt")
-trigram_freq_path = os.path.join(data_dir, "english_trigrams.txt")
+ngram_path = DEFAULT_NGRAM_PATH
 
 # --- SCORING FUNCTIONS ---
 @lru_cache(maxsize=None)
 def load_ngram_frequencies(file_path: str) -> Dict[str, float]:
-    freqs = {}
-    if not os.path.exists(file_path): return {}
-    with open(file_path, 'r', encoding='utf-8') as f:
-        for line in f:
-            parts = line.strip().split()
-            if len(parts) == 2:
-                freqs[parts[0].upper()] = float(parts[1])
-    total = sum(freqs.values())
-    if total > 0:
-        for ngram in freqs: freqs[ngram] /= total
-    return freqs
+    return load_ngram_scores(file_path)
 
 def calculate_ngram_score(text: str, expected_freqs: Dict[str, float], n: int) -> float:
-    if not expected_freqs: return float('inf')
-    text = "".join(filter(str.isalpha, text.upper()))
-    if len(text) < n: return float('inf')
-    
-    observed_counts = Counter(text[i:i+n] for i in range(len(text) - n + 1))
-    total_ngrams = sum(observed_counts.values())
-    if total_ngrams == 0: return float('inf')
-    
-    chi_squared_score = 0
-    floor = 0.01
-    for ngram, expected_prob in expected_freqs.items():
-        observed_count = observed_counts.get(ngram, 0)
-        expected_count = expected_prob * total_ngrams
-        chi_squared_score += ((observed_count - expected_count) ** 2) / max(expected_count, floor)
-    return chi_squared_score
+    return score_text(text, expected_freqs)
 
 # --- GRONSFELD CORE FUNCTIONS ---
 def highlight_phrases(text: str, phrases: list) -> str:
@@ -174,7 +150,7 @@ def run_exhaustive_attack(ciphertext: str, alphabet: str, expected_freqs: Dict):
             highlighted = highlight_phrases(result['decrypted'], result['matched_phrases'])
             print(f"{GREY}-{'':-^50}{RESET}")
             print(f"Rank #{i+1}: Key: {YELLOW}{result['key']}{RESET}{phrase_marker}")
-            print(f"Scores: Bigram: {YELLOW}{result['score']:.2f}{RESET} | IoC: {YELLOW}{result['ioc']:.4f}{RESET}")
+            print(f"Scores: N-gram: {YELLOW}{result['score']:.2f}{RESET} | IoC: {YELLOW}{result['ioc']:.4f}{RESET}")
             print(f"Decrypted: {highlighted}")
     else:
         print(f"\n{RED}NO SOLUTIONS FOUND{RESET}")
@@ -192,11 +168,11 @@ def run_simulated_annealing_attack(ciphertext: str, alphabet: str, config: Dict)
     cooling_rate = config.get('cooling_rate', 0.99995)
     
     scoring_mode = config.get('scoring_mode', '3')
-    ngram_size = config.get('ngram_size', 2)
+    ngram_size = config.get('ngram_size', DEFAULT_NGRAM_SIZE)
     target_min_ioc = config.get('min_ioc', 0.060)
     target_max_ioc = config.get('max_ioc', 0.070)
     
-    freq_path = trigram_freq_path if ngram_size == 3 else bigram_freq_path
+    freq_path = resolve_ngram_path(ngram_size)
     expected_freqs = load_ngram_frequencies(freq_path)
 
     # TOP 5 TRACKER
@@ -285,7 +261,7 @@ def run():
     ciphertext = input("\nEnter the ciphertext: ").upper()
     alphabet = input(f"Enter custom alphabet (default: {RED}A-Z{RESET}): ").upper() or "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
     
-    expected_freqs = load_ngram_frequencies(bigram_freq_path)
+    expected_freqs = load_ngram_frequencies(ngram_path)
 
     while True:
         print(f"\n{GREY}{'-'*50}{RESET}")
@@ -311,8 +287,8 @@ def run():
             config['scoring_mode'] = input(">> ").strip() or '3'
             
             if config['scoring_mode'] in ['1', '3']:
-                ng = input(f"Use Bigrams(2) or Trigrams(3)? (default {YELLOW}2{RESET}): ")
-                config['ngram_size'] = 3 if ng == '3' else 2
+                ng = input(f"Choose n-gram size (2-6, default {YELLOW}{DEFAULT_NGRAM_SIZE}{RESET}): ")
+                config['ngram_size'] = int(ng) if ng else DEFAULT_NGRAM_SIZE
                 
             if config['scoring_mode'] in ['2', '3']:
                 config['min_ioc'] = float(input(f"Enter target MIN IoC (default {YELLOW}0.060{RESET}): ") or 0.060)
@@ -324,9 +300,4 @@ def run():
             break
 
 if __name__ == "__main__":
-    if not os.path.exists(data_dir): os.makedirs(data_dir)
-    if not os.path.exists(bigram_freq_path):
-        with open(bigram_freq_path, 'w') as f: f.write("TH 1.52\nHE 1.28\nIN 0.94\n")
-    if not os.path.exists(trigram_freq_path):
-        with open(trigram_freq_path, 'w') as f: f.write("THE 1.81\nAND 0.73\nING 0.72\n")
     run()

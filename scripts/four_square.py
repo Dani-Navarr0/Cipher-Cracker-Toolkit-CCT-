@@ -4,10 +4,11 @@ import time
 import os
 from collections import Counter
 from utils.utils import get_input_ciphertexts
+from ngram_scoring import DEFAULT_NGRAM_PATH, load_ngram_scores, score_text
 
 RESET, GREEN, YELLOW, RED, GREY = '\033[0m', '\033[32m', '\033[33m', '\033[31m', '\033[90m'
 ALPHABET = "ABCDEFGHIKLMNOPQRSTUVWXYZ" # J is typically omitted
-bigram_freq_path = os.path.join(os.path.dirname(__file__), "data", "english_bigrams.txt")
+ngram_path = DEFAULT_NGRAM_PATH
 
 def calculate_ioc(text: str) -> float:
     text = ''.join(filter(str.isalpha, text.upper()))
@@ -19,27 +20,10 @@ def calculate_ioc(text: str) -> float:
     return numerator / denominator if denominator > 0 else 0.0
 
 def load_bigram_frequencies(file_path):
-    freqs = {}
-    try:
-        with open(file_path, 'r', encoding='utf-8') as f:
-            for line in f:
-                parts = line.strip().split()
-                if len(parts) == 2: freqs[parts[0].upper()] = float(parts[1])
-        total = sum(freqs.values())
-        return {k: v / total for k, v in freqs.items()}
-    except FileNotFoundError: return {}
+    return load_ngram_scores(file_path)
 
 def calculate_fitness(text, expected_freqs):
-    text = "".join(filter(str.isalpha, text.upper()))
-    if len(text) < 2: return float('inf')
-    observed = Counter(text[i:i+2] for i in range(len(text)-1))
-    total_bigrams = sum(observed.values())
-    score = 0.0
-    for bigram, expected_prob in expected_freqs.items():
-        obs_count = observed.get(bigram, 0)
-        exp_count = expected_prob * total_bigrams
-        score += ((obs_count - exp_count) ** 2) / max(exp_count, 0.01)
-    return score
+    return score_text(text, expected_freqs)
 
 def generate_square(key):
     sq = []
@@ -112,7 +96,7 @@ def run_sa(ciphertext, expected_freqs, config):
 
     print(f"\n{GREEN}Annealing Complete in {time.time() - start_time:.2f}s!{RESET}")
     print(f"Key 1 (Top-Right): {best_tr}\nKey 2 (Bottom-Left): {best_bl}")
-    print(f"Bigram Score: {YELLOW}{best_score:.2f}{RESET}")
+    print(f"N-gram Score: {YELLOW}{best_score:.2f}{RESET}")
     print(f"IoC: {YELLOW}{final_ioc:.4f}{RESET}")
     print(f"Plaintext:\n{best_plaintext}\n")
 
@@ -140,7 +124,7 @@ def run():
             s = input(f"Enter steps per temperature (default {YELLOW}1000{RESET}): ")
             config['steps_per_temp'] = int(s) if s else 1000
 
-            run_sa(cipher, load_bigram_frequencies(bigram_freq_path), config)
+            run_sa(cipher, load_bigram_frequencies(ngram_path), config)
 
 if __name__ == "__main__":
     run()

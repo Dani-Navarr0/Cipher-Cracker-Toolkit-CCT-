@@ -2,6 +2,7 @@ import os
 import math
 from collections import Counter
 from typing import Dict, List
+from ngram_scoring import DEFAULT_NGRAM_PATH, load_ngram_scores, score_text
 
 # --- DUMMY UTILS CLASS ---
 class DummyUtils:
@@ -23,7 +24,7 @@ class DummyUtils:
                     f.write(f"Key: A={result['a']}, B={result['b']}\n")
                     f.write(f"Alphabet: {result['alphabet']}\n")
                     f.write(f"IoC Score: {result.get('ioc', 0):.4f}\n")
-                    f.write(f"Bigram Score: {result.get('score', 0):.2f}\n")
+                    f.write(f"N-gram Score: {result.get('score', 0):.2f}\n")
                     f.write(f"Decrypted: {result['plaintext']}\n")
                     f.write("-" * 20 + "\n")
             print(f"{GREEN}Results successfully saved to {filename}{RESET}")
@@ -37,37 +38,14 @@ RED, YELLOW, GREY, GREEN, BLUE, RESET = '\033[38;5;88m', '\033[38;5;3m', '\033[3
 try: data_dir = os.path.join(os.path.dirname(__file__), "data")
 except NameError: data_dir = "data"
 
-bigram_freq_path = os.path.join(data_dir, "english_bigrams.txt")
+ngram_path = DEFAULT_NGRAM_PATH
 
 # --- SCORING FUNCTIONS ---
 def load_ngram_frequencies(file_path: str) -> Dict[str, float]:
-    freqs = {}
-    if not os.path.exists(file_path): return {}
-    with open(file_path, 'r', encoding='utf-8') as f:
-        for line in f:
-            parts = line.strip().split()
-            if len(parts) == 2: freqs[parts[0].upper()] = float(parts[1])
-    total = sum(freqs.values())
-    if total > 0:
-        for ngram in freqs: freqs[ngram] /= total
-    return freqs
+    return load_ngram_scores(file_path)
 
-def calculate_ngram_score(text: str, expected_freqs: Dict[str, float], n: int = 2) -> float:
-    if not expected_freqs: return float('inf')
-    text = "".join(filter(str.isalpha, text.upper()))
-    if len(text) < n: return float('inf')
-    
-    observed_counts = Counter(text[i:i+n] for i in range(len(text) - n + 1))
-    total_ngrams = sum(observed_counts.values())
-    if total_ngrams == 0: return float('inf')
-    
-    chi_squared_score = 0
-    floor = 0.01
-    for ngram, expected_prob in expected_freqs.items():
-        observed_count = observed_counts.get(ngram, 0)
-        expected_count = expected_prob * total_ngrams
-        chi_squared_score += ((observed_count - expected_count) ** 2) / max(expected_count, floor)
-    return chi_squared_score
+def calculate_ngram_score(text: str, expected_freqs: Dict[str, float], n: int = 5) -> float:
+    return score_text(text, expected_freqs)
 
 # --- AFFINE CORE FUNCTIONS ---
 def get_alphabet(alphabet_str: str):
@@ -121,7 +99,7 @@ def brute_force_affine(ciphertext: str, alphabet_str: str, expected_freqs: Dict)
                 'plaintext': pt, 'ioc': ioc, 'score': score
             })
             
-    # Rank by Bigram Score (lowest is best)
+    # Rank by N-gram score (lowest is best)
     results.sort(key=lambda x: x['score'])
     return results
 
@@ -136,9 +114,9 @@ def run():
     alphabet_input = input(f"{GREY}Enter custom alphabet (default: A-Z): {RESET}").upper().strip()
     alphabet_str = alphabet_input if alphabet_input else "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
     
-    expected_freqs = load_ngram_frequencies(bigram_freq_path)
+    expected_freqs = load_ngram_frequencies(ngram_path)
     if not expected_freqs:
-        print(f"{RED}Warning: Bigram file not found. Scoring will be disabled.{RESET}")
+        print(f"{RED}Warning: N-gram scores were not loaded. Scoring will be disabled.{RESET}")
         
     results = brute_force_affine(ciphertext, alphabet_str, expected_freqs)
     
@@ -146,7 +124,7 @@ def run():
         print(f"\n{YELLOW}--- TOP 10 MATCHES ---{RESET}")
         for i, res in enumerate(results[:10]):
             print(f"Rank #{i+1}: Key: {YELLOW}A={res['a']}, B={res['b']}{RESET}")
-            print(f"Scores: Bigram: {YELLOW}{res['score']:.2f}{RESET} | IoC: {YELLOW}{res['ioc']:.4f}{RESET}")
+            print(f"Scores: N-gram: {YELLOW}{res['score']:.2f}{RESET} | IoC: {YELLOW}{res['ioc']:.4f}{RESET}")
             print(f"Text: {res['plaintext'][:80]}...\n{GREY}{'-'*40}{RESET}")
             
         save = input(f"\n{GREY}Save results to file? (Y/N): {RESET}").strip().upper()
@@ -157,7 +135,4 @@ def run():
         print(f"{RED}No solutions found.{RESET}")
 
 if __name__ == "__main__":
-    if not os.path.exists(data_dir): os.makedirs(data_dir)
-    if not os.path.exists(bigram_freq_path):
-        with open(bigram_freq_path, 'w') as f: f.write("TH 1.52\nHE 1.28\nIN 0.94\n")
     run()

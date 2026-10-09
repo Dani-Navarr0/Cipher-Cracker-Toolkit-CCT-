@@ -9,7 +9,7 @@ A comprehensive, powerful command-line toolkit for classical cryptanalysis, ciph
 CCT is divided into four main categories, accessible via an interactive terminal launcher.
 
 ### 1. Substitution Ciphers
-Tools to encrypt, decrypt, and brute-force classical substitution ciphers:
+Tools to encrypt, decrypt, and brute-force substitution ciphers:
 * **Caesar Cipher**
 * **Vigenère Cipher**
 * **Beaufort Cipher**
@@ -34,17 +34,22 @@ Tools for ciphers that rearrange the plaintext without changing the alphabet:
 * **Rail Fence Cipher**
 
 ### 3. Advanced Cryptanalysis & Heuristics
-The core strength of the CCT lies in its algorithmic approaches to cracking ciphers without knowing the key. Recent updates include a **Dynamic Fitness Engine** supporting Pure N-Gram, Pure IoC Tolerance, and Combined scoring to actively strip away layers of Double Ciphers.
+The core strength of the CCT lies in its algorithmic approaches to cracking ciphers without knowing the key. Recent updates include a **Dynamic Fitness Engine** supporting Pure N-Gram, Pure IoC Tolerance, and Combined scoring to actively strip away layers of Double Ciphers. It uses the AZDecrypt library of N-Grams and language Spaces
 
-* **Simulated Annealing (SA):** Cracks completely random Simple Substitution and complex Polyalphabetic ciphers from scratch using thermal cooling, with N-gram/IoC scoring.
+* **Simulated Annealing (SA):** For completely random Simple Substitution and complex Polyalphabetic ciphers, with N-gram/IoC scoring.
 * **Genetic Algorithms (GA):** Breeds and mutates generations of keys to crack highly complex systems like the Gromark Cipher.
-* **Hill Climbing:** Unscrambles complex transpositions and polyalphabetic sequences by optimizing bigram fitness.
-* **Vigenère Auto-Solver:** Fully automated frequency analysis and key deduction for standard Vigenère ciphers.
-* **Word Pattern Isomorphism:** Instantly solves space-preserving substitution ciphers by mapping word shapes (e.g., `1-2-2-1-3-4`) against a dictionary (e.g., `ATTACK`).
+* **Hill Climbing:** Unscrambles complex transpositions and polyalphabetic sequences by optimizing n-gram fitness.
+* **Vigenère Auto-Solver:** Automated frequency analysis and key deduction for standard Vigenère ciphers.
+* **Word Pattern Isomorphism:** Solves space-preserving substitution ciphers by mapping word shapes (e.g., `1-2-2-1-3-4`) against a dictionary (e.g., `ATTACK`).
 * **Automated Crib Dragging:** "Drags" a suspected plaintext word across a ciphertext to reveal underlying key snippets.
 * **Kasiski Examination:** Analyzes polyalphabetic ciphers to find repeating substrings and deduce the key length.
 * **Friedman Test:** Mathematically estimates polyalphabetic key lengths using the Index of Coincidence (IoC).
 * **Matrix Permutation Solver:** Generates and solves matrix-based permutations.
+
+### N-Gram Scoring
+Scoring tools load their English n-gram scores from the `N-grams` folder. The default is the included `5-grams_english_practicalcryptography_wortschatz.txt` model; configurable solvers also let you select sizes 2 through 6, using the corresponding English datasets in that folder. Higher source-file scores indicate more likely n-grams, and the TUI reports a lower-is-better scoring cost.
+
+The substitution simulated-annealing solver can restore word spacing using the space-aware n-gram models under `N-grams/Spaces`. It discovers the available languages and reads each model's alphabet and n-gram size from its accompanying `.ini` file instead of relying on a built-in word list.
 
 ### 4. Utilities
 * **Calculate IoC (Index of Coincidence):** Determines whether a cipher is monoalphabetic or polyalphabetic.

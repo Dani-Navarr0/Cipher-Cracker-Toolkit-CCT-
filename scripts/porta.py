@@ -6,6 +6,7 @@ import os
 import random
 import math
 from utils.utils import get_input_ciphertexts
+from ngram_scoring import DEFAULT_NGRAM_PATH, load_ngram_scores, score_text
 
 try:
     from scripts.kasiski import analyze_kasiski
@@ -40,7 +41,7 @@ class DummyUtils:
                     if 'ioc' in result:
                         f.write(f"IoC Score: {result.get('ioc', 0):.4f}\n")
                     if 'bigram_score' in result:
-                        f.write(f"Bigram Score: {result.get('bigram_score', 0):.2f}\n")
+                        f.write(f"N-gram Score: {result.get('bigram_score', 0):.2f}\n")
                     if include_phrases and result.get('is_phrase_match'):
                         f.write(f"Matched Phrases: {', '.join(result.get('matched_phrases', []))}\n")
                     f.write(f"Plaintext: {result['plaintext']}\n")
@@ -55,39 +56,14 @@ RESET, GREEN, YELLOW, RED, BLUE, CYAN, GREY = '\033[0m', '\033[32m', '\033[33m',
 
 data_dir = os.path.join(os.path.dirname(__file__), "data")
 dictionary_path = os.path.join(data_dir, "words_alpha.txt")
-bigram_freq_path = os.path.join(data_dir, "english_bigrams.txt")
+ngram_path = DEFAULT_NGRAM_PATH
 
 @lru_cache(maxsize=None)
 def load_bigram_frequencies(file_path: str) -> Dict[str, float]:
-    freqs = {}
-    if not os.path.exists(file_path): return {}
-    with open(file_path, 'r', encoding='utf-8') as f:
-        for line in f:
-            parts = line.strip().split()
-            if len(parts) == 2: freqs[parts[0].upper()] = float(parts[1])
-    total = sum(freqs.values())
-    if total > 0:
-        for bigram in freqs: freqs[bigram] /= total
-    return freqs
+    return load_ngram_scores(file_path)
 
 def calculate_bigram_score(text: str, expected_freqs: Dict[str, float]) -> float:
-    if not expected_freqs: return float('inf')
-    text = "".join(char for char in text.upper() if char.isalpha())
-    if len(text) < 2: return float('inf')
-    observed_counts = {}
-    total_bigrams = 0
-    for i in range(len(text) - 1):
-        bigram = text[i:i+2]
-        observed_counts[bigram] = observed_counts.get(bigram, 0) + 1
-        total_bigrams += 1
-    if total_bigrams == 0: return float('inf')
-    chi_squared = 0
-    floor = 0.01
-    for bigram, expected_prob in expected_freqs.items():
-        obs = observed_counts.get(bigram, 0)
-        exp = expected_prob * total_bigrams
-        chi_squared += ((obs - exp) ** 2) / max(exp, floor)
-    return chi_squared
+    return score_text(text, expected_freqs)
 
 @lru_cache(maxsize=None)
 def get_alphabet(alphabet_str: str):
@@ -232,7 +208,7 @@ def run_simulated_annealing(ciphertext: str, alphabet_str: str, expected_freqs: 
     best_ioc = utils.calculate_ioc(best_plaintext)
     
     print(f"\nFinal Best Key: {YELLOW}{best_key}{RESET}")
-    print(f"Bigram Score: {YELLOW}{best_score:.2f}{RESET}")
+    print(f"N-gram Score: {YELLOW}{best_score:.2f}{RESET}")
     print(f"IoC: {YELLOW}{best_ioc:.4f}{RESET}")
     print(f"Text: {best_plaintext}\n")
     
@@ -242,7 +218,7 @@ def run():
     print(f"{GREY}================================{RESET}\n{RED}PORTA SOLVER{RESET}\n{GREY}================================{RESET}")
     ciphertexts = get_input_ciphertexts(prompt="Enter ciphertext")
     if not ciphertexts: return
-    expected_freqs = load_bigram_frequencies(bigram_freq_path)
+    expected_freqs = load_bigram_frequencies(ngram_path)
     
     while True:
         print(f"\n{GREY}Select Action:{RESET}")

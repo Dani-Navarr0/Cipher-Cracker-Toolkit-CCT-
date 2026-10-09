@@ -2,6 +2,7 @@ import os
 import math
 from functools import lru_cache
 from typing import List, Dict
+from ngram_scoring import DEFAULT_NGRAM_PATH, load_ngram_scores, score_text
 
 # --- DUMMY UTILS CLASS (to make script standalone) ---
 class DummyUtils:
@@ -14,7 +15,7 @@ class DummyUtils:
                 for result in results:
                     f.write(f"Key (Sides/Diameter): {result['key']}\n")
                     f.write(f"IoC Score: {result.get('ioc', 0):.4f}\n")
-                    f.write(f"Bigram Score: {result.get('bigram_score', 0):.2f}\n")
+                    f.write(f"N-gram Score: {result.get('bigram_score', 0):.2f}\n")
                     f.write(f"Decrypted: {result['plaintext']}\n")
                     f.write("-" * 20 + "\n")
             print(f"{GREEN}Results successfully saved to {filename}{RESET}")
@@ -32,7 +33,7 @@ BLUE = '\033[38;5;21m'
 RESET = '\033[0m'
 
 data_dir = os.path.join(os.path.dirname(__file__), "data")
-bigram_freq_path = os.path.join(data_dir, "english_bigrams.txt")
+ngram_path = DEFAULT_NGRAM_PATH
 
 # --- SCORING FUNCTIONS ---
 def calculate_ioc(text: str) -> float:
@@ -47,44 +48,10 @@ def calculate_ioc(text: str) -> float:
 
 @lru_cache(maxsize=None)
 def load_bigram_frequencies(file_path: str) -> Dict[str, float]:
-    """Loads and normalizes English bigram frequencies."""
-    freqs = {}
-    if not os.path.exists(file_path): return {}
-    try:
-        with open(file_path, 'r', encoding='utf-8') as f:
-            for line in f:
-                parts = line.strip().split()
-                if len(parts) == 2:
-                    freqs[parts[0].upper()] = float(parts[1])
-        total = sum(freqs.values())
-        if total > 0:
-            for bigram in freqs:
-                freqs[bigram] /= total
-        return freqs
-    except FileNotFoundError:
-        return {}
+    return load_ngram_scores(file_path)
 
 def calculate_bigram_score(text: str, expected_freqs: Dict[str, float]) -> float:
-    """Calculates a fitness score based on bigram frequencies (lower is better)."""
-    if not expected_freqs: return float('inf')
-    text = "".join(char for char in text.upper() if char.isalpha())
-    if len(text) < 2: return float('inf')
-    
-    observed_counts = {}
-    total_bigrams = len(text) - 1
-    for i in range(total_bigrams):
-        bigram = text[i:i+2]
-        observed_counts[bigram] = observed_counts.get(bigram, 0) + 1
-        
-    chi_squared_score = 0.0
-    floor = 0.01
-    for bigram, expected_prob in expected_freqs.items():
-        observed_count = observed_counts.get(bigram, 0)
-        expected_count = expected_prob * total_bigrams
-        difference = observed_count - expected_count
-        chi_squared_score += (difference ** 2) / max(expected_count, floor)
-        
-    return chi_squared_score
+    return score_text(text, expected_freqs)
 
 # --- SCYTALE CORE FUNCTIONS ---
 
@@ -132,7 +99,7 @@ def brute_force_scytale(ciphertext: str):
     Tries all possible numbers of sides for the Scytale and ranks the results.
     """
     print(f"\n{GREY}Loading bigram frequency data...{RESET}")
-    expected_freqs = load_bigram_frequencies(bigram_freq_path)
+    expected_freqs = load_bigram_frequencies(ngram_path)
     if not expected_freqs:
         print(f"{RED}Warning: Bigram frequency file not found. Scoring will be less accurate.{RESET}")
 
@@ -211,7 +178,7 @@ def run():
         print(f"{YELLOW}--- Top 10 Brute-Force Results (Best First) ---{RESET}")
         for i, result in enumerate(results[:10]):
             color = GREEN if i == 0 else ""
-            print(f"{color}Key: {result['key']:<3} | IoC: {result['ioc']:.4f} | Bigram Score: {result['bigram_score']:.2f} | Text: {result['plaintext']}{RESET}")
+            print(f"{color}Key: {result['key']:<3} | IoC: {result['ioc']:.4f} | N-gram Score: {result['bigram_score']:.2f} | Text: {result['plaintext']}{RESET}")
 
         save_choice = input(f"\n{GREY}Save all {len(results)} results to a file? ({YELLOW}Y/N{RESET}): {GREEN}").upper()
         if save_choice == 'Y':
@@ -227,13 +194,8 @@ if __name__ == "__main__":
     # Create dummy data file if it doesn't exist for standalone execution
     if not os.path.exists(data_dir):
         os.makedirs(data_dir)
-    if not os.path.exists(bigram_freq_path):
-        print(f"{GREY}Creating dummy bigram frequency file at '{bigram_freq_path}'...{RESET}")
-        with open(bigram_freq_path, 'w') as f:
-            f.write("TH 1.52\nHE 1.28\nIN 0.94\nER 0.94\nAN 0.82\n")
 
     try:
         run()
     except (KeyboardInterrupt, EOFError):
         print(f"\n{GREY}Program exited.{RESET}")
-

@@ -5,6 +5,7 @@ import time
 import sys
 from functools import lru_cache
 from typing import List, Dict
+from ngram_scoring import DEFAULT_NGRAM_PATH, load_ngram_scores, score_text
 
 # --- DUMMY UTILS CLASS (to make script standalone) ---
 class DummyUtils:
@@ -31,7 +32,7 @@ class DummyUtils:
                     for row in result['matrix']:
                         f.write(f"  {row}\n")
                     f.write(f"IoC Score: {result.get('ioc', 0):.4f}\n")
-                    f.write(f"Bigram Score: {result.get('bigram_score', 0):.2f}\n")
+                    f.write(f"N-gram Score: {result.get('bigram_score', 0):.2f}\n")
                     f.write(f"Decrypted: {result['plaintext']}\n")
                     f.write("-" * 20 + "\n")
             print(f"{GREEN}Results successfully saved to {filename}{RESET}")
@@ -49,46 +50,15 @@ GREEN = '\033[38;5;2m'
 BLUE = '\033[38;5;4m'
 
 data_dir = os.path.join(os.path.dirname(__file__), "data")
-bigram_freq_path = os.path.join(data_dir, "english_bigrams.txt")
+ngram_path = DEFAULT_NGRAM_PATH
 
 # --- SCORING FUNCTIONS ---
 @lru_cache(maxsize=None)
 def load_bigram_frequencies(file_path: str) -> Dict[str, float]:
-    freqs = {}
-    if not os.path.exists(file_path): return {}
-    try:
-        with open(file_path, 'r', encoding='utf-8') as f:
-            for line in f:
-                parts = line.strip().split()
-                if len(parts) == 2:
-                    freqs[parts[0].upper()] = float(parts[1])
-        total = sum(freqs.values())
-        if total > 0:
-            for bigram in freqs:
-                freqs[bigram] /= total
-        return freqs
-    except FileNotFoundError:
-        return {}
+    return load_ngram_scores(file_path)
 
 def calculate_bigram_score(text: str, expected_freqs: Dict[str, float]) -> float:
-    if not expected_freqs: return float('inf')
-    text = "".join(char for char in text.upper() if char.isalpha())
-    if len(text) < 2: return float('inf')
-    observed_counts = {}
-    total_bigrams = 0
-    for i in range(len(text) - 1):
-        bigram = text[i:i+2]
-        observed_counts[bigram] = observed_counts.get(bigram, 0) + 1
-        total_bigrams += 1
-    if total_bigrams == 0: return float('inf')
-    chi_squared_score = 0
-    floor = 0.01
-    for bigram, expected_prob in expected_freqs.items():
-        observed_count = observed_counts.get(bigram, 0)
-        expected_count = expected_prob * total_bigrams
-        difference = observed_count - expected_count
-        chi_squared_score += (difference * difference) / max(expected_count, floor)
-    return chi_squared_score
+    return score_text(text, expected_freqs)
 
 # --- HILL CIPHER CORE FUNCTIONS ---
 def matrix_to_key(matrix, alphabet):
@@ -386,7 +356,7 @@ def run():
             print(f"{RED}Invalid input. Defaulting to 100 results.{RESET}")
             max_results = 100
 
-        expected_freqs = load_bigram_frequencies(bigram_freq_path)
+        expected_freqs = load_bigram_frequencies(ngram_path)
         if not expected_freqs:
             print(f"{RED}Warning: Bigram file not found. Scores will be less accurate.{RESET}")
 
@@ -397,7 +367,7 @@ def run():
 
         if results:
             print(f"\n{GREEN}--- TOP 10 RANKED SOLUTIONS ---{RESET}")
-            print(f"{GREY}Ranked by: 1. Fragment Match, 2. IoC in Range, 3. Bigram Score, 4. IoC Score{RESET}")
+            print(f"{GREY}Ranked by: 1. Fragment Match, 2. IoC in Range, 3. N-gram Score, 4. IoC Score{RESET}")
             for i, result in enumerate(results[:10]):
                 is_in_range = min_ioc <= result['ioc'] <= max_ioc
                 range_marker = GREEN + " (In Range)" + RESET if is_in_range else ""
@@ -407,7 +377,7 @@ def run():
                 print(f"{GREY}-{RESET}" * 50)
                 print(f"Rank #{i+1}: Key: {YELLOW}{result['key_rep']}{RESET}{fragment_marker}")
                 print(f"Matrix: {result['matrix'].flatten().tolist()}")
-                print(f"Scores: IoC: {YELLOW}{result['ioc']:.4f}{RESET}{range_marker} | Bigram: {YELLOW}{result['bigram_score']:.2f}{RESET} (Lower is better)")
+                print(f"Scores: IoC: {YELLOW}{result['ioc']:.4f}{RESET}{range_marker} | N-gram: {YELLOW}{result['bigram_score']:.2f}{RESET} (Lower is better)")
                 print(f"Plaintext: {highlighted}")
             
             if input(f"\nSave all {len(results)} results to a file? (y/n): {RESET}").lower() == 'y':
@@ -420,10 +390,4 @@ def main():
     run()
 
 if __name__ == "__main__":
-    if not os.path.exists(data_dir):
-        os.makedirs(data_dir)
-    if not os.path.exists(bigram_freq_path):
-        print(f"{GREY}Creating dummy bigram frequency file at '{bigram_freq_path}'...{RESET}")
-        with open(bigram_freq_path, 'w') as f:
-            f.write("TH 1.52\nHE 1.28\nIN 0.94\nER 0.94\nAN 0.82\n")
     main()

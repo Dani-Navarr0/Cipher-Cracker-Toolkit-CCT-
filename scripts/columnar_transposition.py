@@ -7,6 +7,7 @@ from typing import List, Dict
 from functools import lru_cache
 from itertools import permutations
 import random
+from ngram_scoring import DEFAULT_NGRAM_PATH, load_ngram_scores, score_text
 
 # --- DUMMY UTILS CLASS (to make script standalone) ---
 class DummyUtils:
@@ -19,7 +20,7 @@ class DummyUtils:
                 for result in results:
                     f.write(f"Key: {result['key']}\n")
                     f.write(f"IoC Score: {result.get('ioc', 0):.4f}\n")
-                    f.write(f"Bigram Score: {result.get('bigram_score', 0):.2f}\n")
+                    f.write(f"N-gram Score: {result.get('bigram_score', 0):.2f}\n")
                     f.write(f"Decrypted: {result['plaintext']}\n")
                     f.write("-" * 20 + "\n")
             print(f"{GREEN}Results successfully saved to {filename}{RESET}")
@@ -58,7 +59,7 @@ except NameError:
     data_dir = os.path.join(os.getcwd(), "data")
 
 dictionary_path = os.path.join(data_dir, "words_alpha.txt")
-bigram_freq_path = os.path.join(data_dir, "english_bigrams.txt")
+ngram_path = DEFAULT_NGRAM_PATH
 
 # --- SCORING FUNCTIONS ---
 def calculate_ioc(text: str) -> float:
@@ -72,36 +73,10 @@ def calculate_ioc(text: str) -> float:
 
 @lru_cache(maxsize=None)
 def load_bigram_frequencies(file_path: str) -> Dict[str, float]:
-    freqs = {}
-    if not os.path.exists(file_path): return {}
-    with open(file_path, 'r', encoding='utf-8') as f:
-        for line in f:
-            parts = line.strip().split()
-            if len(parts) == 2:
-                freqs[parts[0].upper()] = float(parts[1])
-    total = sum(freqs.values())
-    if total > 0:
-        for bigram in freqs:
-            freqs[bigram] /= total
-    return freqs
+    return load_ngram_scores(file_path)
 
 def calculate_bigram_score(text: str, expected_freqs: Dict[str, float]) -> float:
-    if not expected_freqs: return float('inf')
-    text = "".join(char for char in text.upper() if char.isalpha())
-    if len(text) < 2: return float('inf')
-    observed_counts = {}
-    total_bigrams = len(text) - 1
-    for i in range(total_bigrams):
-        bigram = text[i:i+2]
-        observed_counts[bigram] = observed_counts.get(bigram, 0) + 1
-    chi_squared_score = 0
-    floor = 0.01
-    for bigram, expected_prob in expected_freqs.items():
-        observed_count = observed_counts.get(bigram, 0)
-        expected_count = expected_prob * total_bigrams
-        difference = observed_count - expected_count
-        chi_squared_score += (difference ** 2) / max(expected_count, floor)
-    return chi_squared_score
+    return score_text(text, expected_freqs)
 
 # --- CORE DECRYPTION AND PROCESSING ---
 def decrypt_columnar_transposition(ciphertext: str, key: str) -> str:
@@ -184,7 +159,7 @@ def run_bruteforce(keys_to_test: List[str], ciphertext: str, required_words: Lis
         print(f"{RED}No keys to test based on the criteria.{RESET}")
         return
 
-    expected_freqs = load_bigram_frequencies(bigram_freq_path)
+    expected_freqs = load_bigram_frequencies(ngram_path)
     all_results = parallel_process_keys(keys_to_test, ciphertext, expected_freqs)
 
     if all_results:
@@ -202,7 +177,7 @@ def run_bruteforce(keys_to_test: List[str], ciphertext: str, required_words: Lis
 
             print(f"{GREY}-{RESET}" * 60)
             print(f"Key: {YELLOW}{result['key']}{RESET}{match_marker}")
-            print(f"Bigram Score: {YELLOW}{result['bigram_score']:.2f}{RESET} (Lower is better), IoC: {YELLOW}{result['ioc']:.4f}{RESET}")
+            print(f"N-gram Score: {YELLOW}{result['bigram_score']:.2f}{RESET} (Lower is better), IoC: {YELLOW}{result['ioc']:.4f}{RESET}")
             print(f"Decrypted: {highlighted_decrypted}")
 
         save_option = input("\nEnter filename to save full results (or press Enter to skip): ")
@@ -303,7 +278,7 @@ def double_exhaustive_attack():
         print(f"{RED}Invalid number.{RESET}")
         return
 
-    expected_freqs = load_bigram_frequencies(bigram_freq_path)
+    expected_freqs = load_bigram_frequencies(ngram_path)
     if not expected_freqs:
         print(f"{YELLOW}Warning: Bigram frequency file not found. Scoring will be unreliable.{RESET}")
         return
@@ -343,7 +318,7 @@ def double_exhaustive_attack():
         if best_result:
             highlighted_decrypted = highlight_phrases(best_result['plaintext'], required_words)
             print(f"Keys: {YELLOW}({best_result['key1']}, {best_result['key2']}){RESET}")
-            print(f"Bigram Score: {YELLOW}{best_result['bigram_score']:.2f}{RESET} (Lower is better)")
+            print(f"N-gram Score: {YELLOW}{best_result['bigram_score']:.2f}{RESET} (Lower is better)")
             print(f"IoC: {YELLOW}{best_result['ioc']:.4f}{RESET}")
             print(f"Decrypted: {highlighted_decrypted}")
         else:
@@ -355,7 +330,7 @@ def double_exhaustive_attack():
             print(f"\n{YELLOW}--- BEST RESULT FOUND BEFORE STOPPING ---{RESET}")
             highlighted_decrypted = highlight_phrases(best_result['plaintext'], required_words)
             print(f"Keys: {YELLOW}({best_result['key1']}, {best_result['key2']}){RESET}")
-            print(f"Bigram Score: {YELLOW}{best_result['bigram_score']:.2f}{RESET}")
+            print(f"N-gram Score: {YELLOW}{best_result['bigram_score']:.2f}{RESET}")
             print(f"IoC: {YELLOW}{best_result['ioc']:.4f}{RESET}")
             print(f"Decrypted: {highlighted_decrypted}")
 
@@ -391,7 +366,7 @@ def simulated_annealing_attack_single():
     initial_temp = 1000.0 
     print(f"Running {YELLOW}{iterations:,}{RESET} iterations... (Updates will print only when a better score is found)")
     
-    expected_freqs = load_bigram_frequencies(bigram_freq_path)
+    expected_freqs = load_bigram_frequencies(ngram_path)
     if not expected_freqs:
         print(f"{RED}Bigram frequency file not found. Cannot score candidates.{RESET}")
         return
@@ -438,7 +413,7 @@ def simulated_annealing_attack_single():
             final_plaintext = decrypt_columnar_transposition(ciphertext, best_state['key'])
             highlighted_decrypted = highlight_phrases(final_plaintext, required_words)
             print(f"Key: {YELLOW}{best_state['key']}{RESET}")
-            print(f"Bigram Score: {YELLOW}{best_state['bigram_score']:.2f}{RESET} (Lower is better)")
+            print(f"N-gram Score: {YELLOW}{best_state['bigram_score']:.2f}{RESET} (Lower is better)")
             print(f"IoC: {YELLOW}{calculate_ioc(final_plaintext):.4f}{RESET}")
             print(f"Decrypted: {highlighted_decrypted}")
         else:
@@ -451,7 +426,7 @@ def simulated_annealing_attack_single():
              final_plaintext = decrypt_columnar_transposition(ciphertext, best_state['key'])
              highlighted_decrypted = highlight_phrases(final_plaintext, required_words)
              print(f"Key: {YELLOW}{best_state['key']}{RESET}")
-             print(f"Bigram Score: {YELLOW}{best_state['bigram_score']:.2f}{RESET}")
+             print(f"N-gram Score: {YELLOW}{best_state['bigram_score']:.2f}{RESET}")
              print(f"Decrypted: {highlighted_decrypted}")
 
 def simulated_annealing_attack_double():
@@ -488,7 +463,7 @@ def simulated_annealing_attack_double():
     initial_temp = 1000.0 
     print(f"Running {YELLOW}{iterations:,}{RESET} iterations... (Updates will print only when a better score is found)")
     
-    expected_freqs = load_bigram_frequencies(bigram_freq_path)
+    expected_freqs = load_bigram_frequencies(ngram_path)
     if not expected_freqs:
         print(f"{RED}Bigram frequency file not found. Cannot score candidates.{RESET}")
         return
@@ -549,7 +524,7 @@ def simulated_annealing_attack_double():
             final_plaintext = decrypt_columnar_transposition(intermediate, best_state['key1'])
             highlighted_decrypted = highlight_phrases(final_plaintext, required_words)
             print(f"Keys: {YELLOW}({best_state['key1']}, {best_state['key2']}){RESET}")
-            print(f"Bigram Score: {YELLOW}{best_state['bigram_score']:.2f}{RESET} (Lower is better)")
+            print(f"N-gram Score: {YELLOW}{best_state['bigram_score']:.2f}{RESET} (Lower is better)")
             print(f"IoC: {YELLOW}{calculate_ioc(final_plaintext):.4f}{RESET}")
             print(f"Decrypted: {highlighted_decrypted}")
         else:
@@ -563,7 +538,7 @@ def simulated_annealing_attack_double():
              final_plaintext = decrypt_columnar_transposition(intermediate, best_state['key1'])
              highlighted_decrypted = highlight_phrases(final_plaintext, required_words)
              print(f"Keys: {YELLOW}({best_state['key1']}, {best_state['key2']}){RESET}")
-             print(f"Bigram Score: {YELLOW}{best_state['bigram_score']:.2f}{RESET}")
+             print(f"N-gram Score: {YELLOW}{best_state['bigram_score']:.2f}{RESET}")
              print(f"Decrypted: {highlighted_decrypted}")
 
 def run():
@@ -597,9 +572,6 @@ def run():
 
 if __name__ == "__main__":
     if not os.path.exists(data_dir): os.makedirs(data_dir)
-    if not os.path.exists(bigram_freq_path):
-        print(f"{GREY}Creating dummy bigram frequency file at '{bigram_freq_path}'...{RESET}")
-        with open(bigram_freq_path, 'w') as f: f.write("TH 1.52\nHE 1.28\n")
     if not os.path.exists(dictionary_path):
         print(f"{GREY}Creating dummy dictionary file at '{dictionary_path}'...{RESET}")
         with open(dictionary_path, 'w') as f: f.write("SECRET\nCRYPTO\nCOLUMN\nKEY\nCIPHER\nATTACK\n")

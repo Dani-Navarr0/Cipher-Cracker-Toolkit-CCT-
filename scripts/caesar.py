@@ -4,6 +4,7 @@ import math
 from functools import lru_cache
 from typing import List, Dict, Tuple
 from utils.utils import get_input_ciphertexts
+from ngram_scoring import DEFAULT_NGRAM_PATH, load_ngram_scores, score_text
 
 # ANSI color codes for terminal output
 RED = '\033[38;5;88m'
@@ -13,9 +14,7 @@ RESET = '\033[0m'
 GREEN = '\033[38;5;2m'
 BLUE = '\033[34m'
 
-# Path for our bigram frequency file
-data_dir = os.path.join(os.path.dirname(__file__), "data")
-bigram_freq_path = os.path.join(data_dir, "english_bigrams.txt")
+ngram_path = DEFAULT_NGRAM_PATH
 
 # --- SCORING FUNCTIONS ---
 
@@ -38,53 +37,12 @@ def calculate_ioc(text: str) -> float:
 
 @lru_cache(maxsize=None)
 def load_bigram_frequencies(file_path: str) -> Dict[str, float]:
-    """Loads English bigram frequencies from a file and normalizes them."""
-    freqs = {}
-    try:
-        with open(file_path, 'r', encoding='utf-8') as f:
-            for line in f:
-                parts = line.strip().split()
-                if len(parts) == 2:
-                    bigram, freq = parts
-                    freqs[bigram.upper()] = float(freq)
-        # Normalize frequencies to probabilities
-        total = sum(freqs.values())
-        if total > 0:
-            for bigram in freqs:
-                freqs[bigram] /= total
-        return freqs
-    except FileNotFoundError:
-        return {}
+    """Loads the configured English n-gram scores."""
+    return load_ngram_scores(file_path)
 
 def calculate_bigram_score(text: str, expected_freqs: Dict[str, float]) -> float:
-    """Calculates a fitness score using the Chi-Squared statistic for bigrams."""
-    if not expected_freqs:
-        return float('inf') # Cannot score if frequency data is missing
-
-    text = "".join(char for char in text.upper() if char.isalpha())
-    if len(text) < 2:
-        return float('inf')
-
-    observed_counts = {}
-    total_bigrams = 0
-    for i in range(len(text) - 1):
-        bigram = text[i:i+2]
-        observed_counts[bigram] = observed_counts.get(bigram, 0) + 1
-        total_bigrams += 1
-    
-    if total_bigrams == 0:
-        return float('inf')
-
-    chi_squared_score = 0
-    floor = 0.01 # A small floor value to prevent division by zero
-
-    for bigram, expected_prob in expected_freqs.items():
-        observed_count = observed_counts.get(bigram, 0)
-        expected_count = expected_prob * total_bigrams
-        difference = observed_count - expected_count
-        chi_squared_score += (difference * difference) / max(expected_count, floor)
-
-    return chi_squared_score
+    """Returns the lower-is-better score for the configured n-gram model."""
+    return score_text(text, expected_freqs)
 
 # --- CAESAR CIPHER FUNCTIONS ---
 
@@ -113,10 +71,8 @@ def brute_force_caesar(ciphertext, alphabet):
     """
     Tries all possible shifts, scores them, and returns a ranked list of results.
     """
-    print(f"\n{GREY}Loading bigram frequency data...{RESET}")
-    expected_freqs = load_bigram_frequencies(bigram_freq_path)
-    if not expected_freqs:
-        print(f"{RED}Warning: Bigram frequency file not found at '{bigram_freq_path}'. Cannot calculate bigram scores.{RESET}")
+    print(f"\n{GREY}Loading 5-gram scoring data...{RESET}")
+    expected_freqs = load_bigram_frequencies(ngram_path)
 
     results = []
     alphabet_length = len(alphabet)
@@ -135,7 +91,7 @@ def brute_force_caesar(ciphertext, alphabet):
             'bigram_score': bigram_score
         })
     
-    # Sort results: primary key is bigram_score (lower is better), secondary key is IoC (higher is better)
+    # Sort results: primary key is n-gram score (lower is better), secondary key is IoC.
     results.sort(key=lambda x: (x['bigram_score'], -x['ioc']))
     
     return results
@@ -149,7 +105,7 @@ def save_caesar_results(filename, results):
             for result in results:
                 f.write(f"Shift: {result['shift']}\n")
                 f.write(f"IoC Score: {result['ioc']:.4f}\n")
-                f.write(f"Bigram Score: {result['bigram_score']:.2f}\n")
+                f.write(f"N-gram Score: {result['bigram_score']:.2f}\n")
                 f.write(f"Plaintext: {result['text']}\n")
                 f.write("-" * 20 + "\n")
         print(f"{GREEN}Results successfully saved to {filename}{RESET}")
@@ -207,23 +163,13 @@ def run():
             results = brute_force_caesar(current_text, alphabet)
             print(f"{YELLOW}--- Top 3 Results ---{RESET}")
             for res in results[:3]:
-                print(f"Shift {res['shift']:<2} | IoC: {res['ioc']:.4f} | Bigram: {res['bigram_score']:.2f} | {res['text'][:50]}...")
+                print(f"Shift {res['shift']:<2} | IoC: {res['ioc']:.4f} | N-gram: {res['bigram_score']:.2f} | {res['text'][:50]}...")
             
             # Optional: Auto-save functionality could go here
             
     print(f"\n{GREY}Batch processing complete.{RESET}")
 
 if __name__ == "__main__":
-    # Create data directory and dummy bigram file if they don't exist
-    if not os.path.exists(data_dir):
-        os.makedirs(data_dir)
-    
-    if not os.path.exists(bigram_freq_path):
-        print(f"{GREY}Creating dummy bigram frequency file at '{bigram_freq_path}'...{RESET}")
-        with open(bigram_freq_path, 'w') as f:
-            f.write("TH 1.52\nHE 1.28\nIN 0.94\nER 0.94\nAN 0.82\nRE 0.68\nES 0.59\n")
-            f.write("ON 0.57\nST 0.55\nNT 0.51\nEN 0.50\nAT 0.46\nED 0.44\nND 0.42\n")
-
     try:
         run()
     except (KeyboardInterrupt, EOFError):

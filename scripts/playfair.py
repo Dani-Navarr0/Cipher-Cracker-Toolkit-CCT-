@@ -1,5 +1,6 @@
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from typing import List, Dict, Tuple
+from ngram_scoring import DEFAULT_NGRAM_PATH, load_ngram_scores, score_text
 import time
 from functools import lru_cache
 import os
@@ -51,7 +52,7 @@ GREEN = '\033[38;5;2m'
 # Default Playfair alphabet
 DEFAULT_ALPHABET = "ABCDEFGHIKLMNOPQRSTUVWXYZ"
 dictionary_path = os.path.join(os.path.dirname(__file__), "data", "words_alpha.txt")
-bigram_freq_path = os.path.join(os.path.dirname(__file__), "data", "english_bigrams.txt")
+ngram_path = DEFAULT_NGRAM_PATH
 
 
 # --- CORE UTILITIES ---
@@ -68,44 +69,10 @@ def deduplicate_results(results: List[Dict]) -> List[Dict]:
 
 @lru_cache(maxsize=None)
 def load_bigram_frequencies(file_path: str) -> Dict[str, float]:
-    freqs = {}
-    try:
-        with open(file_path, 'r', encoding='utf-8') as f:
-            for line in f:
-                parts = line.strip().split()
-                if len(parts) == 2:
-                    bigram, freq = parts
-                    freqs[bigram.upper()] = float(freq)
-        total = sum(freqs.values())
-        for bigram in freqs:
-            freqs[bigram] /= total
-        return freqs
-    except FileNotFoundError:
-        print(f"{RED}Error: Bigram frequency file not found at {file_path}{RESET}")
-        return {}
+    return load_ngram_scores(file_path)
 
 def calculate_fitness_score(text: str, expected_freqs: Dict[str, float]) -> float:
-    text = "".join(char for char in text.upper() if char.isalnum())
-    if len(text) < 2: return float('inf')
-
-    observed_counts = {}
-    total_bigrams = 0
-    for i in range(len(text) - 1):
-        bigram = text[i:i+2]
-        observed_counts[bigram] = observed_counts.get(bigram, 0) + 1
-        total_bigrams += 1
-    
-    if total_bigrams == 0: return float('inf')
-
-    chi_squared_score = 0
-    floor = 0.01 
-    for bigram, expected_prob in expected_freqs.items():
-        observed_count = observed_counts.get(bigram, 0)
-        expected_count = expected_prob * total_bigrams
-        difference = observed_count - expected_count
-        chi_squared_score += (difference * difference) / max(expected_count, floor)
-
-    return chi_squared_score
+    return score_text(text, expected_freqs)
 
 # --- FUNCTIONS FOR BIGRAM FREQUENCY ATTACK ---
 
@@ -484,7 +451,7 @@ def run():
     # 3. Main Action Loop
     while True:
         print(f"\n{GREY}Current Ciphertext: {RESET}{ciphertext[:40]}...")
-        mode = input(f"Choose a mode:\n({YELLOW}1{RESET}) Brute Force w/ Crib\n({YELLOW}2{RESET}) Direct Decrypt\n({YELLOW}3{RESET}) Dictionary Attack (Bigram Fitness)\n({YELLOW}4{RESET}) Memetic Algorithm Attack\n({YELLOW}N{RESET}) Enter New Ciphertext\n({YELLOW}Q{RESET}) Quit to Main Menu\n{GREY}Selection: {RESET}").upper()
+        mode = input(f"Choose a mode:\n({YELLOW}1{RESET}) Brute Force w/ Crib\n({YELLOW}2{RESET}) Direct Decrypt\n({YELLOW}3{RESET}) Dictionary Attack (N-gram Fitness)\n({YELLOW}4{RESET}) Memetic Algorithm Attack\n({YELLOW}N{RESET}) Enter New Ciphertext\n({YELLOW}Q{RESET}) Quit to Main Menu\n{GREY}Selection: {RESET}").upper()
         
         if mode == 'Q':
             print(f"{YELLOW}Returning to main menu...{RESET}")
@@ -500,8 +467,8 @@ def run():
             run_direct_decrypt(ciphertext, current_alphabet)
         
         elif mode == '3':
-            print(f"\n{YELLOW}--- Dictionary Attack (Bigram Fitness) ---{RESET}")
-            results = crack_playfair_by_frequency(ciphertext, dictionary_path, bigram_freq_path, current_alphabet)
+            print(f"\n{YELLOW}--- Dictionary Attack (N-gram Fitness) ---{RESET}")
+            results = crack_playfair_by_frequency(ciphertext, dictionary_path, ngram_path, current_alphabet)
             
             if results:
                 best_result = results[0]
@@ -527,7 +494,7 @@ def run():
             mutation_rate = input(f"Enter mutation rate (default 0.2): ")
             mutation_rate = float(mutation_rate) if mutation_rate else 0.2
 
-            results = crack_playfair_memetic(ciphertext, bigram_freq_path, pop_size, generations, mutation_rate, current_alphabet)
+            results = crack_playfair_memetic(ciphertext, ngram_path, pop_size, generations, mutation_rate, current_alphabet)
             
             if results:
                 best_result = results[0]
@@ -556,7 +523,7 @@ def run():
                 max_ioc = float(input("Enter max IoC: "))
             
             phrase_results, ioc_results = crack_playfair(
-                ciphertext, target_phrases, dictionary_path, specific_keys, min_ioc, max_ioc, bigram_freq_path, current_alphabet
+                ciphertext, target_phrases, dictionary_path, specific_keys, min_ioc, max_ioc, ngram_path, current_alphabet
             )
             
             if phrase_results:

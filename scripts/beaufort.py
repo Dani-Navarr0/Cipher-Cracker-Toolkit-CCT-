@@ -6,6 +6,7 @@ import os
 import random
 import math
 from utils.utils import get_input_ciphertexts
+from ngram_scoring import DEFAULT_NGRAM_PATH, load_ngram_scores, score_text
 
 # --- KASISKI IMPORT ---
 try:
@@ -42,7 +43,7 @@ class DummyUtils:
                     if 'ioc' in result:
                         f.write(f"IoC Score: {result.get('ioc', 0):.4f}\n")
                     if 'bigram_score' in result:
-                        f.write(f"Bigram Score: {result.get('bigram_score', 0):.2f}\n")
+                        f.write(f"N-gram Score: {result.get('bigram_score', 0):.2f}\n")
                     if include_phrases and result.get('is_phrase_match'):
                         f.write(f"Matched Phrases: {', '.join(result.get('matched_phrases', []))}\n")
                     f.write(f"Plaintext: {result['plaintext']}\n")
@@ -64,46 +65,15 @@ GREY = '\033[90m'
 
 data_dir = os.path.join(os.path.dirname(__file__), "data")
 dictionary_path = os.path.join(data_dir, "words_alpha.txt")
-bigram_freq_path = os.path.join(data_dir, "english_bigrams.txt")
+ngram_path = DEFAULT_NGRAM_PATH
 
 # --- SCORING FUNCTIONS ---
 @lru_cache(maxsize=None)
 def load_bigram_frequencies(file_path: str) -> Dict[str, float]:
-    freqs = {}
-    if not os.path.exists(file_path): return {}
-    try:
-        with open(file_path, 'r', encoding='utf-8') as f:
-            for line in f:
-                parts = line.strip().split()
-                if len(parts) == 2:
-                    freqs[parts[0].upper()] = float(parts[1])
-        total = sum(freqs.values())
-        if total > 0:
-            for bigram in freqs:
-                freqs[bigram] /= total
-        return freqs
-    except FileNotFoundError:
-        return {}
+    return load_ngram_scores(file_path)
 
 def calculate_bigram_score(text: str, expected_freqs: Dict[str, float]) -> float:
-    if not expected_freqs: return float('inf')
-    text = "".join(char for char in text.upper() if char.isalpha())
-    if len(text) < 2: return float('inf')
-    observed_counts = {}
-    total_bigrams = 0
-    for i in range(len(text) - 1):
-        bigram = text[i:i+2]
-        observed_counts[bigram] = observed_counts.get(bigram, 0) + 1
-        total_bigrams += 1
-    if total_bigrams == 0: return float('inf')
-    chi_squared_score = 0
-    floor = 0.01
-    for bigram, expected_prob in expected_freqs.items():
-        observed_count = observed_counts.get(bigram, 0)
-        expected_count = expected_prob * total_bigrams
-        difference = observed_count - expected_count
-        chi_squared_score += (difference * difference) / max(expected_count, floor)
-    return chi_squared_score
+    return score_text(text, expected_freqs)
 
 # --- BEAUFORT CORE FUNCTIONS ---
 @lru_cache(maxsize=None)
@@ -257,7 +227,7 @@ def run_dictionary_attack(ciphertext: str, alphabet_str: str, expected_freqs: Di
             phrase_marker = YELLOW + " (Phrase Match)" + RESET if result['is_phrase_match'] else ""
             highlighted = highlight_phrases(result['plaintext'], result['matched_phrases'])
             print(f"Rank #{i+1}: Key: {YELLOW}{result['key']}{RESET}{phrase_marker}")
-            print(f"Scores: IoC: {YELLOW}{result['ioc']:.4f}{RESET}{range_marker} | Bigram: {YELLOW}{result['bigram_score']:.2f}{RESET}")
+            print(f"Scores: IoC: {YELLOW}{result['ioc']:.4f}{RESET}{range_marker} | N-gram: {YELLOW}{result['bigram_score']:.2f}{RESET}")
             print(f"Text: {highlighted[:100]}...")
             print(f"{GREY}-{'':-^30}{RESET}")
     else:
@@ -308,7 +278,7 @@ def run_simulated_annealing_attack(ciphertext: str, alphabet_str: str, expected_
     print("\n" + "="*60)
     best_plaintext = decrypt_beaufort(ciphertext, best_key, alphabet_str).upper()
     print(f"Final Best Key: {YELLOW}{best_key}{RESET}")
-    print(f"Bigram Score: {YELLOW}{best_score:.2f}{RESET}")
+    print(f"N-gram Score: {YELLOW}{best_score:.2f}{RESET}")
     print(f"IoC: {YELLOW}{utils.calculate_ioc(best_plaintext):.4f}{RESET}")
     print(f"Text: {best_plaintext}")
     
@@ -343,9 +313,9 @@ def run():
     else:
         alphabet_strs = ["ABCDEFGHIJKLMNOPQRSTUVWXYZ"]
 
-    expected_freqs = load_bigram_frequencies(bigram_freq_path)
+    expected_freqs = load_bigram_frequencies(ngram_path)
     if not expected_freqs:
-        print(f"{RED}Warning: Bigram file not found.{RESET}")
+        print(f"{RED}Warning: N-gram scores could not be loaded.{RESET}")
 
     while True:
         print(f"\n{GREY}Current Configuration:{RESET}")
@@ -455,10 +425,4 @@ def run():
         print(f"\n{GREY}Batch processing complete.{RESET}")
 
 if __name__ == "__main__":
-    if not os.path.exists(data_dir):
-        os.makedirs(data_dir)
-    if not os.path.exists(bigram_freq_path):
-        print(f"{GREY}Creating dummy bigram frequency file...{RESET}")
-        with open(bigram_freq_path, 'w') as f:
-            f.write("TH 1.52\nHE 1.28\n")
     run()

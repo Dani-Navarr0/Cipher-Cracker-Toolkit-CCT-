@@ -7,6 +7,7 @@ import itertools
 import time
 import random
 from collections import Counter
+from ngram_scoring import DEFAULT_NGRAM_PATH, DEFAULT_NGRAM_SIZE, load_ngram_scores, resolve_ngram_path, score_text
 
 # --- DUMMY UTILS CLASS ---
 class DummyUtils:
@@ -32,7 +33,7 @@ class DummyUtils:
                     if 'score' in result:
                         f.write(f"Fitness Score: {result.get('score', 0):.2f}\n")
                     elif 'bigram_score' in result:
-                        f.write(f"Bigram Score: {result.get('bigram_score', 0):.2f}\n")
+                        f.write(f"N-gram Score: {result.get('bigram_score', 0):.2f}\n")
                     f.write(f"Decrypted: {result.get('decrypted', result.get('text', ''))}\n")
                     f.write("-" * 20 + "\n")
             print(f"{GREEN}Results successfully saved to {filename}{RESET}")
@@ -59,44 +60,20 @@ try: data_dir = os.path.join(os.path.dirname(__file__), "data")
 except NameError: data_dir = "data"
 
 dictionary_path = os.path.join(data_dir, "words_alpha.txt")
-bigram_freq_path = os.path.join(data_dir, "english_bigrams.txt")
-trigram_freq_path = os.path.join(data_dir, "english_trigrams.txt")
+ngram_path = DEFAULT_NGRAM_PATH
 
 # --- SCORING FUNCTIONS ---
 @lru_cache(maxsize=None)
 def load_ngram_frequencies(file_path: str) -> Dict[str, float]:
-    freqs = {}
-    if not os.path.exists(file_path): return {}
-    with open(file_path, 'r', encoding='utf-8') as f:
-        for line in f:
-            parts = line.strip().split()
-            if len(parts) == 2: freqs[parts[0].upper()] = float(parts[1])
-    total = sum(freqs.values())
-    if total > 0:
-        for ngram in freqs: freqs[ngram] /= total
-    return freqs
+    return load_ngram_scores(file_path)
 
 def calculate_ngram_score(text: str, expected_freqs: Dict[str, float], n: int) -> float:
-    if not expected_freqs: return float('inf')
-    text = "".join(filter(str.isalpha, text.upper()))
-    if len(text) < n: return float('inf')
-    
-    observed_counts = Counter(text[i:i+n] for i in range(len(text) - n + 1))
-    total_ngrams = sum(observed_counts.values())
-    if total_ngrams == 0: return float('inf')
-    
-    chi_squared_score = 0
-    floor = 0.01
-    for ngram, expected_prob in expected_freqs.items():
-        observed_count = observed_counts.get(ngram, 0)
-        expected_count = expected_prob * total_ngrams
-        chi_squared_score += ((observed_count - expected_count) ** 2) / max(expected_count, floor)
-    return chi_squared_score
+    return score_text(text, expected_freqs)
 
 # --- DYNAMIC FITNESS ENGINE FACTORY ---
 def get_fitness_evaluator(config: Dict, expected_freqs: Dict):
     scoring_mode = config.get('scoring_mode', '3')
-    ngram_size = config.get('ngram_size', 2)
+    ngram_size = config.get('ngram_size', DEFAULT_NGRAM_SIZE)
     target_min_ioc = config.get('min_ioc', 0.060)
     target_max_ioc = config.get('max_ioc', 0.070)
 
@@ -302,7 +279,7 @@ def process_and_display_results(all_results, required_words):
         print(f"Primer: {YELLOW}{result['primer']}{RESET}")
         print(f"Alphabet: {YELLOW}{result['alphabet']}{RESET}")
         print(f"IoC: {YELLOW}{result['ioc']:.4f}{RESET}{range_marker}")
-        print(f"Bigram Score: {YELLOW}{result['bigram_score']:.2f}{RESET} (Lower is better)")
+        print(f"N-gram Score: {YELLOW}{result['bigram_score']:.2f}{RESET} (Lower is better)")
         print(f"Decrypted: {highlighted_decrypted}")
 
 # --- HEURISTIC SEARCH IMPLEMENTATIONS ---
@@ -553,8 +530,8 @@ def get_config_from_user(mode: str) -> Dict:
     config['scoring_mode'] = input(">> ").strip() or '3'
     
     if config['scoring_mode'] in ['1', '3']:
-        ng = input(f"Use Bigrams(2) or Trigrams(3)? (default {YELLOW}2{RESET}): ")
-        config['ngram_size'] = 3 if ng == '3' else 2
+        ng = input(f"Choose n-gram size (2-6, default {YELLOW}{DEFAULT_NGRAM_SIZE}{RESET}): ")
+        config['ngram_size'] = int(ng) if ng else DEFAULT_NGRAM_SIZE
         
     if config['scoring_mode'] in ['2', '3']:
         config['min_ioc'] = float(input(f"Enter target MIN IoC (default {YELLOW}0.060{RESET}): ") or 0.060)
@@ -566,9 +543,9 @@ def run():
     print(f"{RED}G{RESET}romark {RED}C{RESET}ipher {RED}T{RESET}oolkit")
     print(f"{GREY}-{RESET}" * 50)
     
-    expected_freqs_bigram = load_ngram_frequencies(bigram_freq_path)
+    expected_freqs_bigram = load_ngram_frequencies(ngram_path)
     if not expected_freqs_bigram:
-        print(f"{RED}Warning: Bigram file not found or empty. Some features will be disabled.{RESET}")
+        print(f"{RED}Warning: N-gram scores could not be loaded. Some features will be disabled.{RESET}")
 
     while True:
         print("\nSelect an option:")
@@ -590,7 +567,7 @@ def run():
         elif choice == '4': run_key_length_bruteforce_wrapper(expected_freqs_bigram)
         elif choice in ['5', '6', '7']:
             config = get_config_from_user(choice)
-            freq_path = trigram_freq_path if config.get('ngram_size') == 3 else bigram_freq_path
+            freq_path = resolve_ngram_path(config.get('ngram_size', DEFAULT_NGRAM_SIZE))
             expected_freqs = load_ngram_frequencies(freq_path)
             
             if choice == '5': run_hill_climbing_attack(config, expected_freqs)
@@ -600,11 +577,6 @@ def run():
         else: print(f"{RED}Invalid choice. Please select a valid option.{RESET}")
 
 if __name__ == "__main__":
-    if not os.path.exists(data_dir): os.makedirs(data_dir)
-    if not os.path.exists(bigram_freq_path):
-        with open(bigram_freq_path, 'w', encoding='utf-8') as f: f.write("TH 1.52\nHE 1.28\n")
-    if not os.path.exists(trigram_freq_path):
-        with open(trigram_freq_path, 'w', encoding='utf-8') as f: f.write("THE 1.81\nAND 0.73\n")
     if not os.path.exists(dictionary_path):
         with open(dictionary_path, 'w', encoding='utf-8') as f: f.write("GRONSFELD\nTESTING\n")
     run()
