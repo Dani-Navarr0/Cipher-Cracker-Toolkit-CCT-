@@ -4,7 +4,9 @@ A comprehensive, powerful command-line toolkit for classical cryptanalysis, ciph
 
 ![License](https://img.shields.io/badge/License-MIT-green.svg)
 
-##Features
+<img width="1601" height="515" alt="image" src="https://github.com/user-attachments/assets/d773e34b-7c4e-4fa2-bfe6-9c301f5c7533" />
+
+## Features
 
 CCT is divided into four main categories, accessible via an interactive terminal launcher.
 
