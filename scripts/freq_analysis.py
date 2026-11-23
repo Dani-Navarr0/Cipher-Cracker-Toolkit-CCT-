@@ -1,10 +1,5 @@
 # ANSI color codes for terminal output
-RED = '\033[38;5;88m'
-YELLOW = '\033[38;5;3m'
-GREY = '\033[38;5;238m'
-RESET = '\033[0m'
-GREEN = '\033[38;5;2m'
-BLUE = '\033[38;5;4m'
+from theme import RED, GREEN, YELLOW, BLUE, CYAN, GREY, WHITE, RESET, banner
 
 def analyze_frequency(text):
     """
@@ -120,9 +115,7 @@ def analyze_frequency(text):
     return analysis_text, total_deviation
 
 def run():
-    print(f"{GREEN}===================================={RESET}")
-    print(f"{GREEN}=====    Frequency Analysis    ====={RESET}")
-    print(f"{GREEN}===================================={RESET}")
+    banner("Frequency Analysis", "Letter, bigram and trigram statistics vs English")
     
     input_string = input(f"{GREY}Enter your string: {RESET}")
 

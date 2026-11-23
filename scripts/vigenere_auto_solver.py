@@ -1,6 +1,6 @@
 import string
 
-RED, YELLOW, GREY, RESET, GREEN = '\033[38;5;88m', '\033[38;5;3m', '\033[38;5;238m', '\033[0m', '\033[38;5;2m'
+from theme import RED, GREEN, YELLOW, BLUE, CYAN, GREY, WHITE, RESET, banner
 
 # Standard English letter frequencies
 ENGLISH_FREQ = {
@@ -59,7 +59,7 @@ def auto_crack_vigenere(ciphertext, max_key_len=20):
             total_chi2 += score
             
         # Normalize score based on text length so we can compare different key lengths safely
-        normalized_score = total_chi2 / len(ciphertext)
+        normalized_score = total_chi2 / max(1, len(ciphertext))
         
         if normalized_score < best_overall_score:
             best_overall_score = normalized_score
@@ -81,9 +81,7 @@ def decrypt_vig(ciphertext, key):
     return pt
 
 def run():
-    print(f"{GREEN}===================================={RESET}")
-    print(f"{GREEN}===   Vigenère Auto-Solver       ==={RESET}")
-    print(f"{GREEN}===================================={RESET}")
+    banner("Vigenere Auto-Solver", "Key length plus per-column frequency analysis")
     
     ciphertext = input(f"{GREY}Enter Vigenère ciphertext: {RESET}")
     if not ciphertext.strip(): return

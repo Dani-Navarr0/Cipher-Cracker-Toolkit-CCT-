@@ -1,3 +1,4 @@
+import glob
 import gzip
 import re
 from dataclasses import dataclass
@@ -7,6 +8,8 @@ from pathlib import Path
 
 NGRAM_DIRECTORY = Path(__file__).resolve().parent.parent / "N-grams"
 SPACES_DIRECTORY = NGRAM_DIRECTORY / "Spaces"
+# Parsed text-format models are cached here as raw binary tables (git-ignored).
+CACHE_DIRECTORY = NGRAM_DIRECTORY / ".cache"
 DEFAULT_NGRAM_SIZE = 5
 _NGRAM_FILES = {
     2: "2-grams_english_jarlve_reddit_v1912.gz",
@@ -16,6 +19,44 @@ _NGRAM_FILES = {
     6: "6-grams_english_jarlve_reddit_v1912.gz",
 }
 DEFAULT_NGRAM_PATH = NGRAM_DIRECTORY / _NGRAM_FILES[DEFAULT_NGRAM_SIZE]
+
+# Byte-level tables: map ASCII 'A'-'Z' to codes 0-25 and drop every other byte.
+_LETTER_CODES = bytes.maketrans(b"ABCDEFGHIJKLMNOPQRSTUVWXYZ", bytes(range(26)))
+_NON_LETTERS = bytes(byte for byte in range(256) if not 65 <= byte <= 90)
+_CODES_TO_LETTERS = bytes.maketrans(bytes(range(26)), b"ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+
+
+def text_to_codes(text: str) -> bytes:
+    """Return the A-Z letters of ``text`` (case-insensitive) as bytes of codes 0-25.
+
+    Equivalent to keeping ``char for char in text.upper() if "A" <= char <= "Z"``
+    but runs in C, which matters inside solver loops.
+    """
+    return text.upper().encode("ascii", "ignore").translate(_LETTER_CODES, _NON_LETTERS)
+
+
+def codes_to_text(codes: bytes | bytearray) -> str:
+    """Inverse of :func:`text_to_codes` for codes 0-25."""
+    return bytes(codes).translate(_CODES_TO_LETTERS).decode("ascii")
+
+
+def ngram_total(codes: bytes | bytearray, scores: bytes | bytearray, ngram_size: int) -> int:
+    """Sum the table scores of every overlapping n-gram in ``codes`` (0-25 values).
+
+    Uses a rolling index so each position costs one multiply-add instead of
+    ``ngram_size`` of them. This is the hot loop of every n-gram solver.
+    """
+    if len(codes) < ngram_size:
+        return 0
+    modulus = 26 ** (ngram_size - 1)
+    index = 0
+    for code in codes[:ngram_size - 1]:
+        index = index * 26 + code
+    total = 0
+    for code in codes[ngram_size - 1:]:
+        index = index % modulus * 26 + code
+        total += scores[index]
+    return total
 
 
 @dataclass(frozen=True)
@@ -118,51 +159,70 @@ def add_spaces(text: str, model: SpacingNgramModel) -> str:
     scores = model.scores
     ngram_size = model.size
     alphabet_size = len(model.alphabet)
-    space = " "
+    space = alphabet_indices[" "]
+    suffix_modulus = alphabet_size ** (ngram_size - 1)
 
-    def append_symbol(suffix: str, symbol: str, score: int) -> tuple[str, int]:
-        ngram = suffix + symbol
-        if len(ngram) >= ngram_size:
-            ngram_index = 0
-            for char in ngram[-ngram_size:]:
-                ngram_index = ngram_index * alphabet_size + alphabet_indices[char]
+    # The text is modelled as " " + letters (with optional spaces) + " ".
+    # A suffix is the last (ngram_size - 1) symbols packed into an integer.
+    # Its length is implied by the symbol count, which is fixed for every
+    # state at a given position: 1 + letters consumed + spaces inserted.
+    def append_symbol(suffix: int, symbol_count: int, symbol: int, score: int) -> tuple[int, int]:
+        ngram_index = suffix * alphabet_size + symbol
+        if symbol_count + 1 >= ngram_size:
             score += scores[ngram_index]
-        return ngram[-(ngram_size - 1):] if ngram_size > 1 else "", score
+        return ngram_index % suffix_modulus, score
 
     # Keep separate paths by suffix and number of inserted spaces so each
-    # state has the same eventual n-gram count and can be safely merged.
-    initial_suffix, initial_score = append_symbol("", space, 0)
-    paths: dict[tuple[str, int], tuple[int, str]] = {
-        (initial_suffix, 0): (initial_score, "")
-    }
+    # state has the same eventual n-gram count and can be safely merged
+    # (the final objective is a mean, so it does not decompose otherwise).
+    # Each step stores a back-pointer instead of copying the output string,
+    # which turns the O(n^3) character copying into O(n^2) state updates.
+    initial_suffix, initial_score = append_symbol(0, 0, space, 0)
+    paths: dict[tuple[int, int], int] = {(initial_suffix, 0): initial_score}
+    # history[position][state] = (previous state, whether a space precedes the letter)
+    history: list[dict[tuple[int, int], tuple[tuple[int, int], bool]]] = []
     for position, letter in enumerate(letters):
-        next_paths: dict[tuple[str, int], tuple[int, str]] = {}
-        for (suffix, space_count), (score, output) in paths.items():
-            choices = (False, True) if position else (False,)
+        letter_code = alphabet_indices[letter]
+        next_paths: dict[tuple[int, int], int] = {}
+        back_pointers: dict[tuple[int, int], tuple[tuple[int, int], bool]] = {}
+        choices = (False, True) if position else (False,)
+        for state, score in paths.items():
+            suffix, space_count = state
             for insert_space in choices:
+                symbol_count = 1 + position + space_count
                 next_suffix, next_score = suffix, score
-                next_output = output
                 next_space_count = space_count
                 if insert_space:
-                    next_suffix, next_score = append_symbol(next_suffix, space, next_score)
-                    next_output += space
+                    next_suffix, next_score = append_symbol(next_suffix, symbol_count, space, next_score)
+                    symbol_count += 1
                     next_space_count += 1
-                next_suffix, next_score = append_symbol(next_suffix, letter, next_score)
-                next_output += letter
-                state = (next_suffix, next_space_count)
-                current = next_paths.get(state)
-                if current is None or next_score > current[0]:
-                    next_paths[state] = (next_score, next_output)
+                next_suffix, next_score = append_symbol(next_suffix, symbol_count, letter_code, next_score)
+                next_state = (next_suffix, next_space_count)
+                current = next_paths.get(next_state)
+                if current is None or next_score > current:
+                    next_paths[next_state] = next_score
+                    back_pointers[next_state] = (state, insert_space)
         paths = next_paths
+        history.append(back_pointers)
 
-    def path_quality(item: tuple[tuple[str, int], tuple[int, str]]) -> tuple[float, int]:
-        (suffix, space_count), (score, _) = item
-        _, score_with_end_boundary = append_symbol(suffix, space, score)
-        ngram_count = len(letters) + space_count + 3 - ngram_size
+    letter_count = len(letters)
+
+    def path_quality(item: tuple[tuple[int, int], int]) -> tuple[float, int]:
+        (suffix, space_count), score = item
+        symbol_count = 1 + letter_count + space_count
+        _, score_with_end_boundary = append_symbol(suffix, symbol_count, space, score)
+        ngram_count = letter_count + space_count + 3 - ngram_size
         mean_score = score_with_end_boundary / ngram_count if ngram_count > 0 else 0.0
         return mean_score, -space_count
 
-    return max(paths.items(), key=path_quality)[1][1]
+    state = max(paths.items(), key=path_quality)[0]
+    output: list[str] = []
+    for position in range(letter_count - 1, -1, -1):
+        state, insert_space = history[position][state]
+        output.append(letters[position])
+        if insert_space:
+            output.append(" ")
+    return "".join(reversed(output))
 
 
 @lru_cache(maxsize=None)
@@ -191,19 +251,46 @@ def _load_model_data(file_path: str, ngram_size: int) -> bytearray | bytes:
             )
         return scores
 
+    expected_size = 26 ** ngram_size
+    stat = path.stat()
+    cache_path = CACHE_DIRECTORY / f"{path.name}.{stat.st_size}.{stat.st_mtime_ns}.bin"
+    try:
+        cached = cache_path.read_bytes()
+        if len(cached) == expected_size:
+            return bytearray(cached)
+    except OSError:
+        pass
+
+    scores = _parse_text_model(path, ngram_size)
+
+    # Parsing the text format costs ~2 s for 5-grams; a raw table loads in ms.
+    try:
+        CACHE_DIRECTORY.mkdir(exist_ok=True)
+        for stale in CACHE_DIRECTORY.glob(f"{glob.escape(path.name)}.*.bin"):
+            stale.unlink(missing_ok=True)
+        temporary_path = cache_path.with_suffix(".tmp")
+        temporary_path.write_bytes(scores)
+        temporary_path.replace(cache_path)
+    except OSError:
+        pass  # Read-only install: just parse every session.
+    return scores
+
+
+def _parse_text_model(path: Path, ngram_size: int) -> bytearray:
     with open(path, "rt", encoding="ascii") as ngram_file:
         contents = ngram_file.read()
 
     pattern = re.compile(rf"([A-Z]{{{ngram_size}}})\s*(\d{{1,3}})")
     scores = bytearray(26 ** ngram_size)
     entries_loaded = 0
-    for match in pattern.finditer(contents):
-        score = int(match.group(2))
+    weights = [26 ** power for power in range(ngram_size - 1, -1, -1)]
+    for ngram, score_text_value in pattern.findall(contents):
+        score = int(score_text_value)
         if score > 255:
             raise ValueError(f"Invalid n-gram score {score} in {path}")
         ngram_index = 0
-        for char in match.group(1):
-            ngram_index = ngram_index * 26 + ord(char) - ord("A")
+        for weight, code in zip(weights, ngram.encode("ascii")):
+            ngram_index += weight * (code - 65)
         scores[ngram_index] = score
         entries_loaded += 1
     if not entries_loaded:
@@ -226,22 +313,20 @@ def score_text(
         scores = ngram_scores
         ngram_size = len(next(iter(scores))) if ngram_size is None else ngram_size
 
+    if isinstance(scores, (bytes, bytearray)):
+        codes = text_to_codes(text)
+        if len(codes) < ngram_size:
+            return float("inf")
+        total_score = ngram_total(codes, scores, ngram_size)
+        return 255 - total_score / (len(codes) - ngram_size + 1)
+
     letters = "".join(char for char in text.upper() if "A" <= char <= "Z")
     if len(letters) < ngram_size:
         return float("inf")
-
-    if isinstance(scores, (bytes, bytearray)):
-        total_score = 0
-        for index in range(len(letters) - ngram_size + 1):
-            ngram_index = 0
-            for char in letters[index:index + ngram_size]:
-                ngram_index = ngram_index * 26 + ord(char) - ord("A")
-            total_score += scores[ngram_index]
-    else:
-        total_score = sum(
-            scores.get(letters[index:index + ngram_size], 0)
-            for index in range(len(letters) - ngram_size + 1)
-        )
+    total_score = sum(
+        scores.get(letters[index:index + ngram_size], 0)
+        for index in range(len(letters) - ngram_size + 1)
+    )
     # The source files assign larger byte scores to more likely n-grams;
     # convert their mean to a cost so existing solvers can keep minimizing.
     return 255 - total_score / (len(letters) - ngram_size + 1)

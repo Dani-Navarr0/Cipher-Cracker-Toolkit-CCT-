@@ -6,6 +6,9 @@ import os
 import random
 import math
 from utils.utils import get_input_ciphertexts
+import attack_support
+from annealing import Schedule
+from periodic_solver import solve_periodic
 from ngram_scoring import DEFAULT_NGRAM_PATH, load_ngram_scores, score_text
 
 try:
@@ -46,13 +49,13 @@ class DummyUtils:
                         f.write(f"Matched Phrases: {', '.join(result.get('matched_phrases', []))}\n")
                     f.write(f"Plaintext: {result['plaintext']}\n")
                     f.write("-" * 20 + "\n")
-            print(f"\033[32mResults successfully saved to {filename}\033[0m")
+            print(f"{GREEN}Results successfully saved to {filename}{RESET}")
         except IOError as e:
-            print(f"\033[31mError saving file: {e}\033[0m")
+            print(f"{RED}Error saving file: {e}{RESET}")
 
 utils = DummyUtils()
 
-RESET, GREEN, YELLOW, RED, BLUE, CYAN, GREY = '\033[0m', '\033[32m', '\033[33m', '\033[31m', '\033[34m', '\033[36m', '\033[90m'
+from theme import RED, GREEN, YELLOW, BLUE, CYAN, GREY, WHITE, RESET, banner
 
 data_dir = os.path.join(os.path.dirname(__file__), "data")
 dictionary_path = os.path.join(data_dir, "words_alpha.txt")
@@ -98,20 +101,8 @@ def decrypt_porta(ciphertext: str, key: str, alphabet_str: str) -> str:
             plaintext.append(char.lower())
     return ''.join(plaintext)
 
-def load_dictionary(file_path: str, alphabet_str: str, min_length=3, max_length=15, allowed_lengths=None) -> List[str]:
-    alphabet, _ = get_alphabet(alphabet_str)
-    alphabet_set = set(alphabet)
-    try:
-        with open(file_path, 'r', encoding='utf-8') as file:
-            if allowed_lengths:
-                return [w.strip().upper() for w in file if set(w.strip().upper()).issubset(alphabet_set) and len(w.strip()) in allowed_lengths]
-            return [w.strip().upper() for w in file if set(w.strip().upper()).issubset(alphabet_set) and min_length <= len(w.strip()) <= max_length]
-    except FileNotFoundError:
-        return []
-
-def contains_all_phrases(text: str, phrases: List[str]) -> bool:
-    if not phrases: return False
-    return all(p.upper() in text.upper().replace(" ", "") for p in phrases)
+load_dictionary = attack_support.load_dictionary
+contains_all_phrases = attack_support.contains_all_phrases
 
 def highlight_phrases(text: str, phrases: List[str]) -> str:
     highlighted = text.lower()
@@ -122,18 +113,9 @@ def highlight_phrases(text: str, phrases: List[str]) -> str:
 
 def process_batch(args: Tuple) -> List[Dict]:
     word_batch, ciphertext, target_phrases, alphabet_str, expected_freqs, min_ioc, max_ioc = args
-    results = []
-    for word in word_batch:
-        plaintext = decrypt_porta(ciphertext, word, alphabet_str)
-        is_phrase_match = contains_all_phrases(plaintext, target_phrases)
-        ioc = utils.calculate_ioc(plaintext)
-        if is_phrase_match or (min_ioc <= ioc <= max_ioc):
-            results.append({
-                'key': word, 'plaintext': plaintext, 'ioc': ioc, 
-                'bigram_score': calculate_bigram_score(plaintext, expected_freqs),
-                'is_phrase_match': is_phrase_match, 'matched_phrases': target_phrases if is_phrase_match else []
-            })
-    return results
+    return attack_support.score_batch(
+        (decrypt_porta, word_batch, ciphertext, alphabet_str, target_phrases, expected_freqs, min_ioc, max_ioc)
+    )
 
 def run_dictionary_attack(ciphertext: str, alphabet_str: str, expected_freqs: Dict, config: Dict):
     target_phrases = config.get('target_phrases', [])
@@ -152,18 +134,11 @@ def run_dictionary_attack(ciphertext: str, alphabet_str: str, expected_freqs: Di
     all_results = []
     
     if dictionary:
-        word_batches = [dictionary[i:i + 500] for i in range(0, len(dictionary), 500)]
-        num_processes = max(1, os.cpu_count() - 1)
-        print(f"Processing {YELLOW}{len(dictionary):,}{RESET} words with {YELLOW}{num_processes}{RESET} processes...")
-        start_time = time.time()
-        with ProcessPoolExecutor(max_workers=num_processes) as executor:
-            futures = [executor.submit(process_batch, (b, ciphertext, target_phrases, alphabet_str, expected_freqs, min_ioc, max_ioc)) for b in word_batches]
-            for i, future in enumerate(as_completed(futures)):
-                all_results.extend(future.result())
-                if len(word_batches) > 10: print(f"Progress: {(i + 1) / len(word_batches):.1%}", end='\r')
-        print(f"\nSearch complete in {time.time() - start_time:.2f} seconds.{RESET}")
-    
-    all_results.sort(key=lambda x: (0 if x['is_phrase_match'] else 1, 0 if min_ioc <= x['ioc'] <= max_ioc else 1, x['bigram_score'], -x['ioc']))
+        all_results.extend(attack_support.run_batches(
+            decrypt_porta, dictionary, ciphertext, alphabet_str, target_phrases, expected_freqs, min_ioc, max_ioc
+        ))
+
+    attack_support.sort_results(all_results)
 
     if all_results:
         print(f"\n{YELLOW}--- TOP 5 MATCHES ---{RESET}")
@@ -174,48 +149,38 @@ def run_dictionary_attack(ciphertext: str, alphabet_str: str, expected_freqs: Di
         print(f"{RED}NO SOLUTIONS FOUND.{RESET}")
     return all_results
 
+def porta_rule(c: int, k: int, m: int) -> int:
+    """Porta decryption for alphabet indices (same maths as decrypt_porta)."""
+    half, shift = m // 2, k // 2
+    return ((c + shift) % half) + half if c < half else (c - half - shift) % half
+
+
 def run_simulated_annealing(ciphertext: str, alphabet_str: str, expected_freqs: Dict, config: Dict):
+    """Anneal the key with the shared engine (geometric 20 -> 0.1 schedule)."""
     key_length = config.get('key_length', 5)
     iterations = config.get('iterations', 200000)
-    temp = config.get('initial_temp', 1000.0)
-    cooling_rate = config.get('cooling_rate', 0.99995)
-    
+    restarts = config.get('restarts', 3)
+
     alphabet, _ = get_alphabet(alphabet_str)
-    best_key = current_key = "".join(random.choice(alphabet) for _ in range(key_length))
-    best_score = current_score = calculate_bigram_score(decrypt_porta(ciphertext, current_key, alphabet_str), expected_freqs)
-    
-    try:
-        for i in range(iterations):
-            temp *= cooling_rate
-            if temp <= 0.1: break
-            
-            k_list = list(current_key)
-            k_list[random.randint(0, key_length - 1)] = random.choice(alphabet)
-            neighbor_key = "".join(k_list)
-            
-            neighbor_score = calculate_bigram_score(decrypt_porta(ciphertext, neighbor_key, alphabet_str), expected_freqs)
-            delta = neighbor_score - current_score
-            
-            if delta < 0 or random.random() < math.exp(-delta / temp):
-                current_key, current_score = neighbor_key, neighbor_score
-                if current_score < best_score:
-                    best_key, best_score = current_key, current_score
-                    print(f"Score: {best_score:8.2f} | Key: {best_key}", end='\r')
-    except KeyboardInterrupt:
-        pass
-    
+    results = solve_periodic(ciphertext, alphabet, alphabet, key_length, porta_rule,
+                             expected_freqs, Schedule(iterations), restarts=restarts)
+    if results is None:
+        print(f"{RED}Annealing needs an alphabet that is a permutation of A-Z.{RESET}")
+        return []
+    best_key = results[0][0]
     best_plaintext = decrypt_porta(ciphertext, best_key, alphabet_str).upper()
+    best_score = calculate_bigram_score(best_plaintext, expected_freqs)
     best_ioc = utils.calculate_ioc(best_plaintext)
-    
-    print(f"\nFinal Best Key: {YELLOW}{best_key}{RESET}")
-    print(f"N-gram Score: {YELLOW}{best_score:.2f}{RESET}")
+
+    print(f"\nFinal Best Key: {YELLOW}{best_key}{RESET} {GREY}(Porta key letters work in pairs: A=B, C=D, ...){RESET}")
+    print(f"N-gram Score: {YELLOW}{best_score:.2f}{RESET} (lower is better)")
     print(f"IoC: {YELLOW}{best_ioc:.4f}{RESET}")
     print(f"Text: {best_plaintext}\n")
-    
+
     return [{'key': best_key, 'plaintext': best_plaintext, 'bigram_score': best_score, 'ioc': best_ioc}]
 
 def run():
-    print(f"{GREY}================================{RESET}\n{RED}PORTA SOLVER{RESET}\n{GREY}================================{RESET}")
+    banner("Porta Cipher", "Reciprocal cipher with 13 alphabets")
     ciphertexts = get_input_ciphertexts(prompt="Enter ciphertext")
     if not ciphertexts: return
     expected_freqs = load_bigram_frequencies(ngram_path)

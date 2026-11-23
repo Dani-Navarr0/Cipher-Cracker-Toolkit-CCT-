@@ -3,12 +3,7 @@ import argparse
 from utils import utils
 
 # ANSI color codes for terminal output
-RED = '\033[38;5;88m'
-YELLOW = '\033[38;5;3m'
-GREY = '\033[38;5;238m'
-RESET = '\033[0m'
-GREEN = '\033[38;5;2m'
-BLUE = '\033[38;5;4m'
+from theme import RED, GREEN, YELLOW, BLUE, CYAN, GREY, WHITE, RESET, banner
 
 # Hardcoded path for words_alpha.txt
 WORDLIST_PATH = os.path.join(os.path.dirname(__file__), "data", "words_alpha.txt")
@@ -113,14 +108,14 @@ def brute_force_autokey(ciphertext, alphabet, min_ioc=0.065, max_ioc=0.07,
             if known_fragments:
                 fragment_match = any(contains_fragment(plaintext, fragment) for fragment in known_fragments)
             else:
-                fragment_match = True  # No fragments to check
+                fragment_match = False  # No fragments: rely on the IoC / frequency filters
             
             # Check IoC range
             ioc_match = min_ioc <= ioc <= max_ioc
             
             if ioc_match or fragment_match:
                 if perform_freq_analysis:
-                    freq_analysis, likeness_score = utils.analyze_frequency(plaintext, alphabet)
+                    freq_analysis, likeness_score = utils.analyze_frequency(plaintext)
                     if likeness_score <= freq_threshold:
                         results.append((primer, plaintext, ioc, freq_analysis, likeness_score))
                 else:
@@ -173,9 +168,7 @@ def test_known_case():
     return plaintext
 
 def run():
-    print(f"{RED}==========================================={RESET}")
-    print(f"{RED}= Autokey Cipher Brute Force Tool ={RESET}")
-    print(f"{RED}==========================================={RESET}")
+    banner("Autokey Cipher", "Primer-keyed autoclave: decrypt or brute-force primers")
     
     # Get the alphabet
     default_alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"

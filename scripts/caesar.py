@@ -7,12 +7,7 @@ from utils.utils import get_input_ciphertexts
 from ngram_scoring import DEFAULT_NGRAM_PATH, load_ngram_scores, score_text
 
 # ANSI color codes for terminal output
-RED = '\033[38;5;88m'
-YELLOW = '\033[38;5;3m'
-GREY = '\033[38;5;238m'
-RESET = '\033[0m'
-GREEN = '\033[38;5;2m'
-BLUE = '\033[34m'
+from theme import RED, GREEN, YELLOW, BLUE, CYAN, GREY, WHITE, RESET, banner
 
 ngram_path = DEFAULT_NGRAM_PATH
 
@@ -116,11 +111,7 @@ def save_caesar_results(filename, results):
 
 def run():
     """Main function to run the Caesar decipher CLI."""
-    print(f"{GREY}================================{RESET}")
-    print(f"{RED}= CAESAR SHIFT SOLVER  ={RESET}")
-    print(f"{GREY}================================{RESET}")
-    print(f"{GREY}This tool decrypts a Caesar cipher using a specific key or by brute force.{RESET}")
-    print(f"{GREY}-{RESET}" * 60)
+    banner("Caesar Cipher", "Decrypt with a known shift or try all of them")
     
     # Get user inputs
     ciphertexts = get_input_ciphertexts(prompt="Enter the ciphertext")

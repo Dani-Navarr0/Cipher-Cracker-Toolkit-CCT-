@@ -1,12 +1,15 @@
 import string
 from utils.utils import get_input_ciphertexts
 
-RESET, GREEN, YELLOW, RED, GREY = '\033[0m', '\033[32m', '\033[33m', '\033[31m', '\033[90m'
+from theme import RED, GREEN, YELLOW, BLUE, CYAN, GREY, WHITE, RESET, banner
 
 def decrypt_running_key(ciphertext: str, key_text: str) -> str:
-    key_chars = [k for k in key_text.upper() if k.isalpha()]
+    key_chars = [k for k in key_text.upper() if "A" <= k <= "Z"]
     if not key_chars: return ciphertext
-    
+    needed = sum(1 for char in ciphertext if char.isalpha())
+    if len(key_chars) < needed:
+        raise ValueError(f"Running key has {len(key_chars)} letters but the ciphertext needs {needed}.")
+
     plaintext = []
     k_idx = 0
     for char in ciphertext:
@@ -42,7 +45,7 @@ def crib_drag(ciphertext: str, crib: str):
         print(f"Offset {offset:>3}: {GREEN}{''.join(key_snippet)}{RESET}")
 
 def run():
-    print(f"{GREY}================================{RESET}\n{RED}RUNNING KEY SOLVER{RESET}\n{GREY}================================{RESET}")
+    banner("Running Key Cipher", "Book-key decryption and crib dragging")
     ciphers = get_input_ciphertexts()
     if not ciphers: return
     
@@ -52,7 +55,10 @@ def run():
     for cipher in ciphers:
         if mode == '1':
             key = input(f"{YELLOW}Enter the running key text:{RESET}\n>> ")
-            print(f"\n{GREEN}Plaintext:{RESET}\n{decrypt_running_key(cipher, key)}")
+            try:
+                print(f"\n{GREEN}Plaintext:{RESET}\n{decrypt_running_key(cipher, key)}")
+            except ValueError as error:
+                print(f"{RED}{error}{RESET}")
         elif mode == '2':
             while True:
                 crib = input(f"\nEnter a Crib word to drag (or 'Q' to quit): ").strip()

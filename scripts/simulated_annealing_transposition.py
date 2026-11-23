@@ -14,16 +14,14 @@ from ngram_scoring import (
     available_spacing_models,
     load_spacing_model,
     load_ngram_scores,
+    ngram_total,
     resolve_ngram_path,
+    text_to_codes,
 )
+from transposition_core import letter_entropy, make_decryptor
 
 # ANSI Colors
-RED = '\033[38;5;88m'
-YELLOW = '\033[38;5;3m'
-GREY = '\033[38;5;238m'
-RESET = '\033[0m'
-GREEN = '\033[38;5;2m'
-CYAN = '\033[38;5;6m'
+from theme import RED, GREEN, YELLOW, BLUE, CYAN, GREY, WHITE, RESET, banner
 
 ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 
@@ -208,35 +206,20 @@ def get_decryption_indices(N: int, W: int, mode: str, key: List[int]) -> List[in
 
 
 def decrypt_transposition(ciphertext: str, key_order: List[int], mode: str) -> str:
-    indices = get_decryption_indices(len(ciphertext), len(key_order), mode, key_order)
-    return "".join(ciphertext[i] for i in indices)
+    return make_decryptor(ciphertext, len(key_order), mode)(key_order).decode("latin-1")
 
 
 def calculate_fitness(text: str, ngram_model, ent_weight: float) -> float:
     """AZDecrypt N-Gram log likelihood multiplied by character entropy."""
     scores = ngram_model.scores
     ngram_size = ngram_model.size
-    letters = "".join(char for char in text.upper() if "A" <= char <= "Z")
+    letters = text_to_codes(text)
     al = len(letters) - ngram_size + 1
-    
+
     if al <= 0:
         return -9999.0
 
-    total_score = 0
-    if isinstance(scores, (bytes, bytearray)):
-        for index in range(al):
-            ngram_index = 0
-            for char in letters[index:index + ngram_size]:
-                ngram_index = ngram_index * 26 + ord(char) - ord("A")
-            total_score += scores[ngram_index]
-    else:
-        for index in range(al):
-            total_score += scores.get(letters[index:index + ngram_size], 0)
-
-    L = len(letters)
-    freqs = Counter(letters)
-    entropy = sum(abs(math.log2(count / L) * (count / L)) for count in freqs.values())
-    return (total_score / al) * (entropy ** ent_weight)
+    return (ngram_total(letters, scores, ngram_size) / al) * (letter_entropy(letters) ** ent_weight)
 
 
 def modify_key(key_order: List[int]) -> List[int]:
@@ -258,38 +241,54 @@ def run_simulated_annealing_pass(
 ) -> Tuple[List[int], float, str]:
     current_key = list(range(key_length))
     random.shuffle(current_key)
-    current_text = decrypt_transposition(ciphertext, current_key, mode)
-    current_score = calculate_fitness(current_text, ngram_model, ent_weight)
-    
+
+    # Transposition only reorders letters, so letter entropy is the same for
+    # every key: compute it once. (Same arithmetic as calculate_fitness.)
+    decrypt = make_decryptor(ciphertext, key_length, mode)
+    ngram_size = ngram_model.size
+    scores = ngram_model.scores
+    cipher_codes = text_to_codes(ciphertext)
+    ngram_count = len(cipher_codes) - ngram_size + 1
+    if ngram_count <= 0:
+        def fitness(key):
+            return -9999.0
+    else:
+        entropy_factor = letter_entropy(cipher_codes) ** ent_weight
+        # Decrypting the 0-25 codes keeps the hot loop free of text conversion.
+        decrypt_codes = make_decryptor(cipher_codes, key_length, mode)
+        def fitness(key):
+            return (ngram_total(decrypt_codes(key), scores, ngram_size) / ngram_count) * entropy_factor
+
+    current_score = fitness(current_key)
+
     best_key = current_key
     best_score = current_score
-    
+
     temp = starting_temp
     iteration = 0
     start_time = time.time()
-    
+    rand = random.random
+    exp = math.exp
+
     try:
         while temp > 0.1:
             for _ in range(steps_per_temp):
                 new_key = modify_key(current_key)
-                new_text = decrypt_transposition(ciphertext, new_key, mode)
-                new_score = calculate_fitness(new_text, ngram_model, ent_weight)
-                
+                new_score = fitness(new_key)
+
                 score_diff = new_score - current_score
-                
+
                 if score_diff > 0:
                     current_key = new_key
                     current_score = new_score
-                    
+
                     if new_score > best_score:
                         best_score = new_score
                         best_key = new_key
-                        
-                elif temp > 0:
-                    probability = math.exp(score_diff / temp)
-                    if random.random() < probability:
-                        current_key = new_key
-                        current_score = new_score
+
+                elif temp > 0 and rand() < exp(score_diff / temp):
+                    current_key = new_key
+                    current_score = new_score
             
             temp *= cooling_rate
             iteration += 1
@@ -328,13 +327,10 @@ def save_results_to_file(results: List[Dict], filename: str, static_ioc: float):
 
 
 def run():
-    print(f"{GREEN}===================================={RESET}")
-    print(f"{GREEN}== Simulated Annealing Transposition=={RESET}")
-    print(f"{GREEN}==     (AZdecrypt Paradigms)      =={RESET}")
-    print(f"{GREEN}===================================={RESET}")
+    banner("Simulated Annealing: Transposition", "Column-order search for columnar transpositions")
     
     ciphertext_input = input(f"{GREY}Enter transposition ciphertext: {RESET}").upper()
-    ciphertext = "".join(filter(str.isalpha, ciphertext_input))
+    ciphertext = "".join(char for char in ciphertext_input if "A" <= char <= "Z")
     if not ciphertext:
         print(f"{RED}No valid ciphertext provided.{RESET}")
         return

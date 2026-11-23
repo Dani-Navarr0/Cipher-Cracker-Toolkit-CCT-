@@ -25,12 +25,7 @@ class DummyUtils:
 utils = DummyUtils()
 
 # --- COLOR CODES AND PATHS ---
-RED = '\033[38;5;88m'
-YELLOW = '\033[38;5;3m'
-GREY = '\033[38;5;238m'
-GREEN = '\033[38;5;2m'
-BLUE = '\033[38;5;21m'
-RESET = '\033[0m'
+from theme import RED, GREEN, YELLOW, BLUE, CYAN, GREY, WHITE, RESET, banner
 
 data_dir = os.path.join(os.path.dirname(__file__), "data")
 ngram_path = DEFAULT_NGRAM_PATH
@@ -104,8 +99,9 @@ def brute_force_scytale(ciphertext: str):
         print(f"{RED}Warning: Bigram frequency file not found. Scoring will be less accurate.{RESET}")
 
     results = []
-    # We only need to check up to half the length, as sides > len/2 is trivial.
-    max_sides = len(ciphertext) // 2
+    # Every side count from 2 to len-1 gives a distinct reading (sides above
+    # len/2 are NOT redundant: they produce different short final columns).
+    max_sides = len(ciphertext) - 1
     
     print(f"{GREY}Brute forcing {max_sides - 1} possible key diameters...{RESET}")
 
@@ -133,11 +129,7 @@ def brute_force_scytale(ciphertext: str):
 
 def run():
     """Main function to run the Scytale cipher tool CLI."""
-    print(f"{BLUE}=========================={RESET}")
-    print(f"{BLUE}=   Scytale Cipher Tool  ={RESET}")
-    print(f"{BLUE}=========================={RESET}")
-    print(f"{GREY}A simple transposition cipher used in ancient Greece.{RESET}")
-    print(f"{GREY}-{RESET}" * 60)
+    banner("Scytale Cipher", "Ancient Greek rod transposition")
     
     ciphertext = input(f"Enter the ciphertext: {GREEN}").upper().replace(" ", "")
     

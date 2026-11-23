@@ -1,7 +1,8 @@
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import os
 from typing import List, Tuple, Dict
-import numpy as np
+import math
+from annealing import Schedule, anneal
 from functools import lru_cache
 import itertools
 import time
@@ -55,7 +56,7 @@ class DummyUtils:
 utils = DummyUtils()
 
 # --- COLOR CODES AND PATHS ---
-RED, YELLOW, GREY, GREEN, BLUE, RESET = '\033[38;5;88m', '\033[38;5;3m', '\033[38;5;238m', '\033[38;5;2m', '\033[38;5;21m', '\033[0m'
+from theme import RED, GREEN, YELLOW, BLUE, CYAN, GREY, WHITE, RESET, banner
 try: data_dir = os.path.join(os.path.dirname(__file__), "data")
 except NameError: data_dir = "data"
 
@@ -117,31 +118,29 @@ def create_keyed_alphabet(keyword: str, alphabet: str = "ABCDEFGHIJKLMNOPQRSTUVW
     return ''.join(block[row][col] for col in final_col_order for row in range(rows) if row < len(block) and col < len(block[row]) and block[row][col])
 
 def generate_running_key(primer: str, length: int) -> str:
-    key = np.array([int(d) for d in primer if d.isdigit()], dtype=np.int8)
-    if len(key) != 5: return "" 
-    result = np.zeros(length, dtype=np.int8)
-    result[:len(key)] = key
-    for i in range(len(key), length): result[i] = (result[i-5] + result[i-4]) % 10
-    return ''.join(map(str, result))
+    """Gromark chain addition: each digit = (digit 5 back + digit 4 back) mod 10."""
+    digits = [int(d) for d in primer if d.isdigit()]
+    if len(digits) != 5: return ""
+    for i in range(5, length): digits.append((digits[i - 5] + digits[i - 4]) % 10)
+    return ''.join(map(str, digits[:max(length, 0)]))
 
 def decrypt_gromark(ciphertext: str, mixed_alphabet: str, running_key: str, alphabet: str = "ABCDEFGHIJKLMNOPQRSTUVWXYZ") -> str:
     result = []
     len_alpha = len(alphabet)
-    for i, char in enumerate(ciphertext):
-        if char in mixed_alphabet and i < len(running_key):
+    key_position = 0  # Advances only on enciphered letters, not spaces/punctuation.
+    for char in ciphertext:
+        if char in mixed_alphabet and key_position < len(running_key):
             mixed_pos = mixed_alphabet.find(char)
-            if mixed_pos == -1:
-                result.append(char.lower())
-                continue
             straight_letter = alphabet[mixed_pos]
-            shift = int(running_key[i])
+            shift = int(running_key[key_position])
+            key_position += 1
             orig_pos = (alphabet.find(straight_letter) - shift) % len_alpha
             result.append(alphabet[orig_pos].lower())
         else:
             result.append(char.lower())
     return ''.join(result)
 
-def batch_primers(start: int = 10000, end: int = 99999, batch_size: int = 1000) -> List[List[int]]:
+def batch_primers(start: int = 0, end: int = 99999, batch_size: int = 1000) -> List[List[int]]:
     all_primers = list(range(start, end + 1))
     return [all_primers[i:i + batch_size] for i in range(0, len(all_primers), batch_size)]
 
@@ -158,7 +157,7 @@ def try_decrypt_batch(args: Tuple) -> List[Dict]:
     mixed_alphabet = create_keyed_alphabet(keyword, alphabet)
     for primer in primers:
         try:
-            primer_str = str(primer)
+            primer_str = str(primer).zfill(5)
             running_key = generate_running_key(primer_str, len(ciphertext))
             decrypted = decrypt_gromark(ciphertext, mixed_alphabet, running_key, alphabet)
             
@@ -192,26 +191,55 @@ def validate_keyword(keyword: str, known_segments: List[Tuple], alphabet: str = 
         return True
     except Exception: return False
 
-def parallel_process_keywords(keywords_list: List[str], ciphertext: str, required_words: List[str], alphabet: str, expected_freqs: Dict, batch_size: int = 1000) -> List[Dict]:
+def parallel_process_keywords(keywords_list, ciphertext: str, required_words: List[str], alphabet: str, expected_freqs: Dict, batch_size: int = 1000, keyword_count: int = None) -> List[Dict]:
     all_results = []
     num_processes = max(1, os.cpu_count() - 1)
     primer_batches = batch_primers(batch_size=batch_size)
-    total_batches = len(keywords_list) * len(primer_batches)
+    if keyword_count is None:
+        keyword_count = len(keywords_list)
+    total_batches = keyword_count * len(primer_batches)
     processed_batches = 0
 
     if total_batches == 0: return []
-    print(f"Processing {YELLOW}{len(keywords_list):,}{RESET} keywords across {YELLOW}{len(primer_batches)}{RESET} primer batches using {YELLOW}{num_processes}{RESET} processes.")
+    print(f"Processing {YELLOW}{keyword_count:,}{RESET} keywords across {YELLOW}{len(primer_batches)}{RESET} primer batches using {YELLOW}{num_processes}{RESET} processes.")
 
+    # Submit lazily with a bounded window: queuing every (keyword, batch) task
+    # up front creates tens of millions of futures for a full dictionary.
+    tasks = ((keyword, batch, ciphertext, required_words, alphabet, expected_freqs)
+             for keyword in keywords_list for batch in primer_batches)
+    window = num_processes * 4
     with ProcessPoolExecutor(max_workers=num_processes) as executor:
-        futures = [executor.submit(try_decrypt_batch, (keyword, batch, ciphertext, required_words, alphabet, expected_freqs)) for keyword in keywords_list for batch in primer_batches]
-        for future in as_completed(futures):
-            try: all_results.extend(future.result())
-            except Exception: pass
-            finally:
+        pending = set()
+        for task in itertools.chain(tasks, [None]):
+            if task is not None:
+                pending.add(executor.submit(try_decrypt_batch, task))
+                if len(pending) < window:
+                    continue
+            while pending and (task is None or len(pending) >= window):
+                done = next(as_completed(pending))
+                pending.discard(done)
+                try: all_results.extend(done.result())
+                except Exception: pass
                 processed_batches += 1
                 print(f"Progress: {processed_batches}/{total_batches} batches ({(processed_batches / total_batches) * 100:.1f}%)", end='\r')
     print("\n")
     return all_results
+
+
+def ask_required_words() -> List[str]:
+    """Modes 3/4 test every primer, so they need a crib to recognise hits."""
+    raw = input("Enter known plaintext word(s), comma-separated (required): ").upper()
+    return [word.strip() for word in raw.split(",") if word.strip()]
+
+
+def confirm_search_size(keyword_count: int, primer_count: int = 100000) -> bool:
+    total = keyword_count * primer_count
+    # ~50 us per decryption measured on a 20-core machine; spread over workers.
+    workers = max(1, (os.cpu_count() or 2) - 1)
+    hours = total * 50e-6 / workers / 3600
+    print(f"{YELLOW}This tests {total:,} keyword/primer combinations "
+          f"(roughly {hours:,.1f} h on {workers} processes).{RESET}")
+    return input("Continue? (y/N): ").strip().lower() == 'y'
 
 def get_alphabets_from_user() -> List[str]:
     alphabets = ["ABCDEFGHIJKLMNOPQRSTUVWXYZ"]
@@ -295,7 +323,6 @@ def get_neighbors(keyword: str, primer_str: str, alphabet_for_key: str, num_neig
             neighbors.append((''.join(new_keyword), primer_str))
         else:
             new_primer = (primer_int + random.randint(-100, 100)) % 100000
-            if new_primer < 10000: new_primer += 10000
             neighbors.append((keyword, str(new_primer).zfill(5)))
     return neighbors
 
@@ -313,7 +340,7 @@ def run_hill_climbing_attack(config: Dict, expected_freqs: Dict):
 
     for r in range(config['num_restarts']):
         current_keyword = ''.join(random.choice(config['alphabet_for_key']) for _ in range(config['key_length']))
-        current_primer = str(random.randint(10000, 99999)).zfill(5)
+        current_primer = str(random.randint(0, 99999)).zfill(5)
         mixed_alphabet = create_keyed_alphabet(current_keyword, config['alphabet_for_cipher'])
         running_key = generate_running_key(current_primer, len(ciphertext))
         current_text = decrypt_gromark(ciphertext, mixed_alphabet, running_key, config['alphabet_for_cipher'])
@@ -364,39 +391,41 @@ def run_simulated_annealing_attack(config: Dict, expected_freqs: Dict):
             top_results.sort(key=lambda x: x['score'])
             if len(top_results) > 5: top_results.pop()
 
+    # Shared annealing engine. Scores here are costs on a 0-255 scale (lower is
+    # better), so the search maximises -cost with temperatures 10 -> 0.05
+    # (single-move cost changes are ~1-20). The previous schedule ran from
+    # 10000 to 1, so about 75% of its steps were a random walk.
+    iterations = config.get('iterations', 100_000)
+    cipher_alphabet, key_alphabet = config['alphabet_for_cipher'], config['alphabet_for_key']
     for r in range(config['num_restarts']):
-        current_keyword = ''.join(random.choice(config['alphabet_for_key']) for _ in range(config['key_length']))
-        current_primer = str(random.randint(10000, 99999)).zfill(5)
-        mixed_alphabet = create_keyed_alphabet(current_keyword, config['alphabet_for_cipher'])
-        running_key = generate_running_key(current_primer, len(ciphertext))
-        current_text = decrypt_gromark(ciphertext, mixed_alphabet, running_key, config['alphabet_for_cipher'])
-        current_score = evaluate_fitness(current_text)
-        
-        best_solution_so_far, best_score_so_far = (current_keyword, current_primer), current_score
-        add_to_top(current_keyword, current_primer, current_score, current_text)
-        
-        temperature, cooling_rate = 10000.0, 0.9995
-        
-        while temperature > 1.0:
-            neighbor_keyword, neighbor_primer = get_neighbors(current_keyword, current_primer, config['alphabet_for_key'], 1)[0]
-            mixed_alphabet = create_keyed_alphabet(neighbor_keyword, config['alphabet_for_cipher'])
-            running_key = generate_running_key(neighbor_primer, len(ciphertext))
-            neighbor_text = decrypt_gromark(ciphertext, mixed_alphabet, running_key, config['alphabet_for_cipher'])
-            neighbor_score = evaluate_fitness(neighbor_text)
-            
-            score_delta = neighbor_score - current_score
-            if score_delta < 0 or random.random() < np.exp(-score_delta / temperature):
-                current_keyword, current_primer, current_score, current_text = neighbor_keyword, neighbor_primer, neighbor_score, neighbor_text
-            
-            if current_score < best_score_so_far:
-                best_solution_so_far, best_score_so_far = (current_keyword, current_primer), current_score
-                display_text = current_text.replace('\n', ' ')[:35]
-                print(f"Restart {r+1}/{config['num_restarts']} | Temp: {temperature:.0f} | Score: {best_score_so_far:.2f} | Key: {best_solution_so_far[0]} | Text: {display_text}...", end='\r')
-            
-            if len(top_results) < 5 or current_score < top_results[-1]['score']:
-                add_to_top(current_keyword, current_primer, current_score, current_text)
-                
-            temperature *= cooling_rate
+        state = {'keyword': ''.join(random.choice(key_alphabet) for _ in range(config['key_length'])),
+                 'primer': str(random.randint(0, 99999)).zfill(5)}
+
+        def decrypt_state(keyword, primer):
+            mixed = create_keyed_alphabet(keyword, cipher_alphabet)
+            return decrypt_gromark(ciphertext, mixed, generate_running_key(primer, len(ciphertext)), cipher_alphabet)
+
+        state['text'] = decrypt_state(state['keyword'], state['primer'])
+        state['cost'] = evaluate_fitness(state['text'])
+        previous = {}
+
+        def propose():
+            keyword, primer = get_neighbors(state['keyword'], state['primer'], key_alphabet, 1)[0]
+            previous.clear(); previous.update(state)
+            text = decrypt_state(keyword, primer)
+            state.update(keyword=keyword, primer=primer, text=text, cost=evaluate_fitness(text))
+            return -state['cost']
+
+        def undo():
+            state.clear(); state.update(previous)
+
+        def report(step, temperature, best, snapshot):
+            print(f"Restart {r+1}/{config['num_restarts']} | Temp: {temperature:6.2f} | Best cost: {-best:.2f} | Key: {snapshot[0]} | Primer: {snapshot[1]}", end='\r')
+
+        (best_keyword, best_primer), best = anneal(
+            -state['cost'], propose, undo, lambda: (state['keyword'], state['primer']),
+            Schedule(iterations, 10.0, 0.05), report)
+        add_to_top(best_keyword, best_primer, -best, decrypt_state(best_keyword, best_primer))
 
     print("\n\n" + "="*80)
     print(f"\n{YELLOW}--- TOP 5 RANKED SOLUTIONS ---{RESET}")
@@ -422,10 +451,10 @@ def run_genetic_algorithm_attack(config: Dict, expected_freqs: Dict):
         for i in range(len(kw_list)):
             if random.random() < rate: kw_list[i] = random.choice(config['alphabet_for_key'])
         ind['keyword'] = "".join(kw_list)
-        if random.random() < rate: ind['primer'] = str(random.randint(10000, 99999)).zfill(5)
+        if random.random() < rate: ind['primer'] = str(random.randint(0, 99999)).zfill(5)
         return ind
 
-    population = [{'keyword': ''.join(random.choice(config['alphabet_for_key']) for _ in range(config['key_length'])), 'primer': str(random.randint(10000, 99999)).zfill(5)} for _ in range(config['pop_size'])]
+    population = [{'keyword': ''.join(random.choice(config['alphabet_for_key']) for _ in range(config['key_length'])), 'primer': str(random.randint(0, 99999)).zfill(5)} for _ in range(config['pop_size'])]
     best_overall_ind, best_overall_score = None, float('inf')
 
     for gen in range(config['gens']):
@@ -454,7 +483,7 @@ def run_genetic_algorithm_attack(config: Dict, expected_freqs: Dict):
         next_generation = population[:config['elitism']]
         while len(next_generation) < config['pop_size']:
             p1, p2 = random.choice(population[:20]), random.choice(population[:20])
-            split = random.randint(1, len(p1['keyword']) - 1)
+            split = random.randint(1, len(p1['keyword']) - 1) if len(p1['keyword']) > 1 else 1
             child = {
                 'keyword': p1['keyword'][:split] + p2['keyword'][split:],
                 'primer': "".join(random.choice(p) for p in zip(p1['primer'], p2['primer']))
@@ -493,18 +522,38 @@ def run_direct_decryption():
 def run_dictionary_attack_wrapper(expected_freqs):
     print(f"\n{GREEN}--- Mode 3: Dictionary Attack ---{RESET}")
     ciphertext = input("Enter ciphertext: ").upper()
-    words = [w.strip().upper() for w in open(dictionary_path, 'r') if 1 <= len(w.strip()) <= 15]
-    results = parallel_process_keywords(words, ciphertext, [], "ABCDEFGHIJKLMNOPQRSTUVWXYZ", expected_freqs)
-    process_and_display_results(results, [])
+    required_words = ask_required_words()
+    if not required_words:
+        print(f"{RED}A known word is required to recognise solutions in this mode.{RESET}")
+        return
+    length_input = input("Keyword length(s) to try, e.g. 5 or 4-7 (default 1-15): ").strip()
+    try:
+        low, _, high = length_input.partition("-")
+        min_len, max_len = (int(low), int(high or low)) if length_input else (1, 15)
+    except ValueError:
+        min_len, max_len = 1, 15
+    with open(dictionary_path, 'r', encoding='utf-8') as word_file:
+        words = list(dict.fromkeys(w.strip().upper() for w in word_file if min_len <= len(w.strip()) <= max_len))
+    if not confirm_search_size(len(words)):
+        return
+    results = parallel_process_keywords(words, ciphertext, required_words, "ABCDEFGHIJKLMNOPQRSTUVWXYZ", expected_freqs)
+    process_and_display_results(results, required_words)
 
 def run_key_length_bruteforce_wrapper(expected_freqs):
     print(f"\n{GREEN}--- Mode 4: Brute-Force by Key Length ---{RESET}")
     ciphertext = input("Enter ciphertext: ").upper()
     key_length = int(input("Enter key length to brute-force: "))
+    required_words = ask_required_words()
+    if not required_words:
+        print(f"{RED}A known word is required to recognise solutions in this mode.{RESET}")
+        return
     alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-    keywords = [''.join(p) for p in itertools.product(alphabet, repeat=key_length)]
-    results = parallel_process_keywords(keywords, ciphertext, [], alphabet, expected_freqs)
-    process_and_display_results(results, [])
+    if not confirm_search_size(len(alphabet) ** key_length):
+        return
+    keywords = (''.join(p) for p in itertools.product(alphabet, repeat=key_length))
+    results = parallel_process_keywords(keywords, ciphertext, required_words, alphabet, expected_freqs,
+                                        keyword_count=len(alphabet) ** key_length)
+    process_and_display_results(results, required_words)
 
 def get_config_from_user(mode: str) -> Dict:
     config = {}
@@ -513,6 +562,9 @@ def get_config_from_user(mode: str) -> Dict:
     
     if mode in ['5', '6']:
         config['num_restarts'] = int(input(f"Enter number of random restarts (e.g., 10): ") or "10")
+    if mode == '6':
+        steps = input(f"Enter annealing steps per restart (default 100000): ").replace(",", "").strip()
+        config['iterations'] = int(steps) if steps.isdigit() else 100_000
     if mode == '5':
         config['max_iterations'] = int(input(f"Enter max iterations per climb (e.g., 1000): ") or "1000")
     if mode == '7':
@@ -540,8 +592,7 @@ def get_config_from_user(mode: str) -> Dict:
     return config
 
 def run():
-    print(f"{RED}G{RESET}romark {RED}C{RESET}ipher {RED}T{RESET}oolkit")
-    print(f"{GREY}-{RESET}" * 50)
+    banner("Gromark Cipher", "Keyed alphabet + chain-added numeric primer")
     
     expected_freqs_bigram = load_ngram_frequencies(ngram_path)
     if not expected_freqs_bigram:

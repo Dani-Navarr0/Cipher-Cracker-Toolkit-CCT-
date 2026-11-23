@@ -15,17 +15,16 @@ from ngram_scoring import (
     available_spacing_models,
     load_spacing_model,
     load_ngram_scores,
+    ngram_total,
     resolve_ngram_path,
+    text_to_codes,
 )
+# Same four layouts as the SA transposition solver; its slice-based decryptor
+# is verified identical to get_decryption_indices below.
+from transposition_core import make_decryptor, letter_entropy
 
 # ANSI Colors
-RED = '\033[38;5;88m'
-YELLOW = '\033[38;5;3m'
-GREY = '\033[38;5;238m'
-RESET = '\033[0m'
-GREEN = '\033[38;5;2m'
-CYAN = '\033[38;5;6m'
-BLUE = '\033[38;5;4m'
+from theme import RED, GREEN, YELLOW, BLUE, CYAN, GREY, WHITE, RESET, banner
 
 TRANSPOSITION_MODES = {
     '1': ('write_rows_read_rows', 'Write Rows, Permute Cols, Read Rows (Standard Matrix Transposition)'),
@@ -201,34 +200,35 @@ def get_decryption_indices(N: int, W: int, mode: str, perm: List[int]) -> List[i
 
 
 def decrypt_permutation(ciphertext: str, width: int, perm: List[int], mode: str) -> str:
-    indices = get_decryption_indices(len(ciphertext), width, mode, perm)
-    return "".join(ciphertext[i] for i in indices)
+    return make_decryptor(ciphertext, width, mode)(perm).decode("latin-1")
+
+
+def make_fitness(ciphertext: str, width: int, mode: str, ngram_model, ent_weight: float):
+    """Return ``fitness(perm)`` equal to calculate_fitness(decrypt_permutation(...)).
+
+    A permutation only reorders letters, so the entropy factor is computed
+    once; each call is one C-level decrypt plus the rolling n-gram sum.
+    """
+    codes = text_to_codes(ciphertext)
+    ngram_size, scores = ngram_model.size, ngram_model.scores
+    ngram_count = len(codes) - ngram_size + 1
+    if ngram_count <= 0:
+        return lambda perm: -9999.0
+    entropy_factor = letter_entropy(codes) ** ent_weight
+    decrypt_codes = make_decryptor(codes, width, mode)
+    return lambda perm: (ngram_total(decrypt_codes(perm), scores, ngram_size) / ngram_count) * entropy_factor
 
 
 def calculate_fitness(text: str, ngram_model, ent_weight: float) -> float:
     scores = ngram_model.scores
     ngram_size = ngram_model.size
-    letters = "".join(char for char in text.upper() if "A" <= char <= "Z")
+    letters = text_to_codes(text)
     al = len(letters) - ngram_size + 1
-    
+
     if al <= 0:
         return -9999.0
 
-    total_score = 0
-    if isinstance(scores, (bytes, bytearray)):
-        for index in range(al):
-            ngram_index = 0
-            for char in letters[index:index + ngram_size]:
-                ngram_index = ngram_index * 26 + ord(char) - ord("A")
-            total_score += scores[ngram_index]
-    else:
-        for index in range(al):
-            total_score += scores.get(letters[index:index + ngram_size], 0)
-
-    L = len(letters)
-    freqs = Counter(letters)
-    entropy = sum(abs(math.log2(count / L) * (count / L)) for count in freqs.values())
-    return (total_score / al) * (entropy ** ent_weight)
+    return (ngram_total(letters, scores, ngram_size) / al) * (letter_entropy(letters) ** ent_weight)
 
 
 def modify_perm(perm: List[int]) -> List[int]:
@@ -258,8 +258,8 @@ def run_simulated_annealing_pass(
 ) -> Tuple[List[int], float, str]:
     current_perm = list(range(width))
     random.shuffle(current_perm)
-    current_text = decrypt_permutation(ciphertext, width, current_perm, mode)
-    current_score = calculate_fitness(current_text, ngram_model, ent_weight)
+    fitness = make_fitness(ciphertext, width, mode, ngram_model, ent_weight)
+    current_score = fitness(current_perm)
     
     best_perm = current_perm
     best_score = current_score
@@ -272,8 +272,7 @@ def run_simulated_annealing_pass(
         while temp > 0.1:
             for _ in range(steps_per_temp):
                 new_perm = modify_perm(current_perm)
-                new_text = decrypt_permutation(ciphertext, width, new_perm, mode)
-                new_score = calculate_fitness(new_text, ngram_model, ent_weight)
+                new_score = fitness(new_perm)
                 
                 score_diff = new_score - current_score
                 
@@ -322,15 +321,13 @@ def run_brute_force_for_width(
     best_text = ""
     
     start_time = time.time()
+    fitness = make_fitness(ciphertext, width, mode, ngram_model, ent_weight)
     for p in all_perms:
-        perm_list = list(p)
-        text = decrypt_permutation(ciphertext, width, perm_list, mode)
-        score = calculate_fitness(text, ngram_model, ent_weight)
-        
+        score = fitness(p)
         if score > best_score:
             best_score = score
-            best_perm = perm_list
-            best_text = text
+            best_perm = list(p)
+    best_text = decrypt_permutation(ciphertext, width, best_perm, mode)
 
     time_taken = time.time() - start_time
     print(f"{GREEN}Brute Force Complete in {time_taken:.2f}s! Best Score: {best_score:.2f}{RESET}")
@@ -360,10 +357,7 @@ def save_results_to_file(results: List[Dict], filename: str, static_ioc: float):
 
 
 def run():
-    print(f"{GREEN}=========================================={RESET}")
-    print(f"{GREEN}= Matrix Permutation Solver (Keyless)    ={RESET}")
-    print(f"{GREEN}=   (Simulated Annealing & Brute Force)  ={RESET}")
-    print(f"{GREEN}=========================================={RESET}")
+    banner("Matrix Permutation Solver", "Keyless column-order search: brute force and annealing")
 
     ciphertext_input = input(f"\n{GREY}Enter ciphertext: {RESET}").strip().upper()
     ciphertext = "".join(filter(str.isalpha, ciphertext_input))
@@ -385,7 +379,7 @@ def run():
     w_in = input(f"\nEnter specific width(s) separated by commas, or blank for all factors: ").strip()
     if w_in:
         try:
-            target_widths = [int(w.strip()) for w in w_in.split(",") if int(w.strip()) in factors or int(w.strip()) < length]
+            target_widths = [int(w) for w in (part.strip() for part in w_in.split(",")) if w and 2 <= int(w) < length]
         except ValueError:
             target_widths = factors
     else:

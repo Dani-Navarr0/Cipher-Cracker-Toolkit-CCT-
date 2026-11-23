@@ -3,11 +3,7 @@ import math
 from collections import Counter
 
 # ANSI color codes
-RED = '\033[38;5;88m'
-YELLOW = '\033[38;5;3m'
-GREY = '\033[38;5;238m'
-RESET = '\033[0m'
-GREEN = '\033[38;5;2m'
+from theme import RED, GREEN, YELLOW, BLUE, CYAN, GREY, WHITE, RESET, banner
 
 def get_factors(n):
     """Returns all factors of a number (excluding 1)."""
@@ -64,8 +60,10 @@ def analyze_kasiski(ciphertext):
     print("-" * 50)
     
     # Calculate distances between adjacent occurrences
-    for seq, positions in list(sequences.items())[:10]: # Show top 10
-        print(f"{GREEN}{seq:<10}{RESET} | {len(positions):<5} | {positions}")
+    # Use every repeated sequence for the statistics; only the display is capped.
+    for shown, (seq, positions) in enumerate(sequences.items()):
+        if shown < 10:
+            print(f"{GREEN}{seq:<10}{RESET} | {len(positions):<5} | {positions}")
         for i in range(len(positions) - 1):
             distance = positions[i+1] - positions[i]
             distances.append(distance)
@@ -83,18 +81,17 @@ def analyze_kasiski(ciphertext):
     
     # Sort factors by frequency, ignoring lengths > 20 as they are less common for basic ciphers
     likely_lengths = []
+    top_count = factor_counts.most_common(1)[0][1] if factor_counts else 0
     for factor, count in factor_counts.most_common():
         if 2 <= factor <= 20:
-            color = GREEN if count > factor_counts.most_common(1)[0][1] * 0.7 else YELLOW
+            color = GREEN if count > top_count * 0.7 else YELLOW
             print(f"{color}{factor:<12}{RESET} | {count}")
             likely_lengths.append(factor)
             
     return likely_lengths
 
 def run():
-    print(f"{GREEN}===================================={RESET}")
-    print(f"{GREEN}=====     Kasiski Examiner     ====={RESET}")
-    print(f"{GREEN}===================================={RESET}")
+    banner("Kasiski Examination", "Repeated sequences reveal the key length")
     
     ciphertext = input(f"{GREY}Enter ciphertext (e.g., from a Vigenère cipher): {RESET}")
     if not ciphertext:

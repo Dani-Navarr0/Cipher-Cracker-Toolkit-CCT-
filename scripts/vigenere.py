@@ -9,6 +9,7 @@ import re
 from pathlib import Path
 from collections import Counter
 from utils.utils import get_input_ciphertexts
+import attack_support
 from ngram_scoring import (
     DEFAULT_NGRAM_PATH,
     DEFAULT_NGRAM_SIZE,
@@ -18,8 +19,10 @@ from ngram_scoring import (
     available_spacing_models,
     load_spacing_model,
     load_ngram_scores,
+    ngram_total,
     resolve_ngram_path,
     score_text,
+    text_to_codes,
 )
 
 # --- KASISKI IMPORT ---
@@ -71,14 +74,7 @@ class DummyUtils:
 utils = DummyUtils()
 
 # --- COLOR CODES AND PATHS ---
-RESET = '\033[0m'
-GREEN = '\033[32m'
-YELLOW = '\033[33m'
-RED = '\033[31m'
-BLUE = '\033[34m'
-CYAN = '\033[36m'
-WHITE = '\033[37m'
-GREY = '\033[90m'
+from theme import RED, GREEN, YELLOW, BLUE, CYAN, GREY, WHITE, RESET, banner
 
 data_dir = os.path.join(os.path.dirname(__file__), "data")
 dictionary_path = os.path.join(data_dir, "words_alpha.txt")
@@ -184,34 +180,49 @@ def select_spacing_model_path(ngram_path_input: Path) -> Path:
 
 
 def calculate_fitness(text: str, ngram_model, ent_weight: float) -> float:
-    scores = ngram_model.scores
-    ngram_size = ngram_model.size
-    
-    letters = "".join(char for char in text.upper() if "A" <= char <= "Z")
+    return codes_fitness(text_to_codes(text), ngram_model.scores, ngram_model.size, ent_weight)
+
+
+def codes_fitness(letters: bytes, scores, ngram_size: int, ent_weight: float) -> float:
+    """calculate_fitness for text already reduced to 0-25 letter codes."""
     al = len(letters) - ngram_size + 1
     if al <= 0:
         return 0.0
-
-    total_score = 0
-    if isinstance(scores, (bytes, bytearray)):
-        for index in range(al):
-            ngram_index = 0
-            for char in letters[index:index + ngram_size]:
-                ngram_index = ngram_index * 26 + ord(char) - ord("A")
-            total_score += scores[ngram_index]
-    else:
-        for index in range(al):
-            total_score += scores.get(letters[index:index + ngram_size], 0)
-
-    L = len(letters)
-    freqs = Counter(letters)
+    total = len(letters)
     entropy = 0.0
-    for count in freqs.values():
-        p = count / L
+    for count in Counter(letters).values():
+        p = count / total
         entropy += abs(math.log2(p) * p)
+    return (ngram_total(letters, scores, ngram_size) / al) * (entropy ** ent_weight)
 
-    mean_score = total_score / al
-    return mean_score * (entropy ** ent_weight)
+
+def make_column_decryptor(ciphertext: str, key_length: int, alphabet_str: str):
+    """Fast Vigenere decryption to letter codes, one key column at a time.
+
+    Returns ``(column_bytes, shift_tables)`` or None when the alphabet is not a
+    permutation of A-Z (custom alphabets then use the general slow path).
+    Column j holds the ciphertext symbols that key letter j decrypts (key
+    position advances only on alphabet symbols, as in decrypt_vigenere), and
+    ``shift_tables[s]`` maps a symbol index to the A-Z code it decrypts to.
+    """
+    alphabet, alphabet_dict = get_alphabet(alphabet_str)
+    if sorted(alphabet) != [chr(65 + i) for i in range(26)]:
+        return None
+    symbols = []
+    for char in ciphertext:
+        char_upper = char.upper()
+        if char_upper in alphabet_dict:
+            symbols.append(alphabet_dict[char_upper])
+        elif text_to_codes(char):
+            return None  # e.g. 'ß' -> 'SS': would be scored but not decrypted.
+    symbols = bytes(symbols)
+    columns = [symbols[j::key_length] for j in range(key_length)]
+    plain_codes = [ord(char) - 65 for char in alphabet]
+    shift_tables = [
+        bytes(plain_codes[(index - shift) % 26] for index in range(26)) + bytes(230)
+        for shift in range(26)
+    ]
+    return columns, shift_tables
 
 # --- VIGENERE CORE FUNCTIONS ---
 
@@ -240,26 +251,8 @@ def decrypt_vigenere(ciphertext: str, key: str, alphabet_str: str) -> str:
             plaintext.append(char.lower())
     return ''.join(plaintext)
 
-def load_dictionary(file_path: str, alphabet_str: str, min_length: int = 3, max_length: int = 15, allowed_lengths: List[int] = None) -> List[str]:
-    alphabet, _ = get_alphabet(alphabet_str)
-    alphabet_set = set(alphabet)
-    try:
-        with open(file_path, 'r', encoding='utf-8') as file:
-            if allowed_lengths:
-                return [word.strip().upper() for word in file
-                        if set(word.strip().upper()).issubset(alphabet_set)
-                        and len(word.strip()) in allowed_lengths]
-            else:
-                return [word.strip().upper() for word in file
-                        if set(word.strip().upper()).issubset(alphabet_set)
-                        and min_length <= len(word.strip()) <= max_length]
-    except FileNotFoundError:
-        print(f"{RED}Error: {file_path} not found{RESET}")
-        return []
-
-def contains_all_phrases(text: str, phrases: List[str]) -> bool:
-    if not phrases: return False
-    return all(phrase.upper() in text.upper().replace(" ", "") for phrase in phrases)
+load_dictionary = attack_support.load_dictionary
+contains_all_phrases = attack_support.contains_all_phrases
 
 def highlight_phrases(text: str, phrases: List[str]) -> str:
     highlighted_text = text.lower()
@@ -273,24 +266,9 @@ def highlight_phrases(text: str, phrases: List[str]) -> str:
 
 def process_batch(args: Tuple) -> List[Dict]:
     word_batch, ciphertext, target_phrases, alphabet_str, expected_freqs, min_ioc, max_ioc = args
-    results = []
-    
-    for word in word_batch:
-        plaintext = decrypt_vigenere(ciphertext, word, alphabet_str)
-        is_phrase_match = contains_all_phrases(plaintext, target_phrases)
-        
-        ioc = utils.calculate_ioc(plaintext)
-        
-        if is_phrase_match or (min_ioc <= ioc <= max_ioc):
-            bigram_score = calculate_bigram_score(plaintext, expected_freqs)
-            
-            results.append({
-                'key': word, 'plaintext': plaintext, 'ioc': ioc, 'bigram_score': bigram_score,
-                'is_phrase_match': is_phrase_match,
-                'matched_phrases': target_phrases if is_phrase_match else []
-            })
-            
-    return results
+    return attack_support.score_batch(
+        (decrypt_vigenere, word_batch, ciphertext, alphabet_str, target_phrases, expected_freqs, min_ioc, max_ioc)
+    )
 
 def batch_words(words: List[str], batch_size: int = 500) -> List[List[str]]:
     return [words[i:i + batch_size] for i in range(0, len(words), batch_size)]
@@ -316,43 +294,20 @@ def run_dictionary_attack(ciphertext: str, alphabet_str: str, expected_freqs: Di
     if specific_keys:
         print(f"\n{YELLOW}Checking specific keys...{RESET}")
         for key in specific_keys:
-            plaintext = decrypt_vigenere(ciphertext, key, alphabet_str)
-            is_phrase_match = contains_all_phrases(plaintext, target_phrases)
-            ioc = utils.calculate_ioc(plaintext)
-            if is_phrase_match or (min_ioc <= ioc <= max_ioc):
-                bigram_score = calculate_bigram_score(plaintext, expected_freqs)
-                all_results.append({
-                    'key': key, 'plaintext': plaintext, 'ioc': ioc, 'bigram_score': bigram_score,
-                    'is_phrase_match': is_phrase_match, 'matched_phrases': target_phrases if is_phrase_match else []
-                })
-                if is_phrase_match: print(f"Phrase match found with specific key: {RED}{key}{RESET}")
-            
+            # Keys the user typed explicitly are always reported.
+            result = attack_support.make_result(key, decrypt_vigenere(ciphertext, key, alphabet_str), expected_freqs, target_phrases)
+            all_results.append(result)
+            if result['is_phrase_match']: print(f"Phrase match found with specific key: {RED}{key}{RESET}")
+
     print(f"{YELLOW}Loading dictionary for alphabet {alphabet_str[:10]}...{RESET}")
     dictionary = load_dictionary(dictionary_path, alphabet_str, allowed_lengths=allowed_lengths)
-    
+
     if dictionary:
-        word_batches = batch_words(dictionary)
-        num_processes = max(1, os.cpu_count() - 1)
-        total_batches = len(word_batches)
-        
-        print(f"Processing {YELLOW}{len(dictionary):,}{RESET} words with {YELLOW}{num_processes}{RESET} processes...")
-        start_time = time.time()
-        
-        with ProcessPoolExecutor(max_workers=num_processes) as executor:
-            futures = [executor.submit(process_batch, (b, ciphertext, target_phrases, alphabet_str, expected_freqs, min_ioc, max_ioc)) for b in word_batches]
-            for i, future in enumerate(as_completed(futures)):
-                all_results.extend(future.result())
-                if total_batches > 10:
-                    print(f"Progress: {(i + 1) / total_batches:.1%}", end='\r')
-        print(f"\nDictionary search complete in {time.time() - start_time:.2f} seconds.{RESET}")
-    
-    filtered_results = all_results 
-    filtered_results.sort(key=lambda x: (
-        0 if x['is_phrase_match'] else 1, 
-        0 if min_ioc <= x['ioc'] <= max_ioc else 1,
-        x['bigram_score'], 
-        -x['ioc']
-    ))
+        all_results.extend(attack_support.run_batches(
+            decrypt_vigenere, dictionary, ciphertext, alphabet_str, target_phrases, expected_freqs, min_ioc, max_ioc
+        ))
+
+    filtered_results = attack_support.sort_results(all_results)
 
     if filtered_results:
         print(f"\n{YELLOW}--- TOP 5 MATCHES ---{RESET}")
@@ -392,40 +347,74 @@ def run_simulated_annealing_pass(
     steps_per_temp: int,
     ent_weight: float,
 ) -> Tuple[str, float, str]:
-    alphabet, _ = get_alphabet(alphabet_str)
+    alphabet, alphabet_dict = get_alphabet(alphabet_str)
     current_key = "".join(random.choice(alphabet) for _ in range(key_length))
-    current_text = decrypt_vigenere(ciphertext, current_key, alphabet_str)
-    current_score = calculate_fitness(current_text, ngram_model, ent_weight)
-    
+
+    fast = make_column_decryptor(ciphertext, key_length, alphabet_str) if len(alphabet) > 1 else None
+    if fast is None:
+        # General path (custom alphabets): full decrypt + rescore per step.
+        def propose(key):
+            new_key = modify_vigenere_key(key, alphabet)
+            return new_key, calculate_fitness(decrypt_vigenere(ciphertext, new_key, alphabet_str), ngram_model, ent_weight)
+        def revert():
+            pass
+        current_score = calculate_fitness(decrypt_vigenere(ciphertext, current_key, alphabet_str), ngram_model, ent_weight)
+    else:
+        # Only one key letter changes per step, so only that column of the
+        # plaintext is re-decrypted (a C-level translate + slice assignment).
+        columns, shift_tables = fast
+        scores, ngram_size = ngram_model.scores, ngram_model.size
+        plain = bytearray(sum(len(column) for column in columns))
+        for j, char in enumerate(current_key):
+            plain[j::key_length] = columns[j].translate(shift_tables[alphabet_dict[char]])
+        # Precomputed per-letter choices reproduce modify_vigenere_key's
+        # random.choice calls exactly (same list, same order).
+        other_letters = {char: [c for c in alphabet if c != char] for char in alphabet}
+        randrange, choice = random.randrange, random.choice
+        undo = []
+
+        def propose(key):
+            idx = randrange(key_length)
+            old_char = key[idx]
+            new_char = choice(other_letters[old_char]) if other_letters[old_char] else choice(alphabet)
+            plain[idx::key_length] = columns[idx].translate(shift_tables[alphabet_dict[new_char]])
+            undo[:] = [idx, old_char]
+            return key[:idx] + new_char + key[idx + 1:], codes_fitness(plain, scores, ngram_size, ent_weight)
+
+        def revert():
+            idx, old_char = undo
+            plain[idx::key_length] = columns[idx].translate(shift_tables[alphabet_dict[old_char]])
+
+        current_score = codes_fitness(plain, scores, ngram_size, ent_weight)
+
     best_key = current_key
     best_score = current_score
-    
+
     temp = starting_temp
     iteration = 0
     start_time = time.time()
-    
+    rand, exp = random.random, math.exp
+
     try:
         while temp > 0.1:
             for _ in range(steps_per_temp):
-                new_key = modify_vigenere_key(current_key, alphabet)
-                new_text = decrypt_vigenere(ciphertext, new_key, alphabet_str)
-                new_score = calculate_fitness(new_text, ngram_model, ent_weight)
-                
+                new_key, new_score = propose(current_key)
+
                 score_diff = new_score - current_score
-                
+
                 if score_diff > 0:
                     current_key = new_key
                     current_score = new_score
-                    
+
                     if new_score > best_score:
                         best_score = new_score
                         best_key = new_key
-                        
-                elif temp > 0:
-                    probability = math.exp(score_diff / temp)
-                    if random.random() < probability:
-                        current_key = new_key
-                        current_score = new_score
+
+                elif temp > 0 and rand() < exp(score_diff / temp):
+                    current_key = new_key
+                    current_score = new_score
+                else:
+                    revert()
             
             temp *= cooling_rate
             iteration += 1
@@ -529,9 +518,7 @@ def run_direct_decrypt(ciphertext: str, alphabet_str: str, config: Dict):
 # --- MAIN APPLICATION ---
 
 def run():
-    print(f"{GREY}================================{RESET}")
-    print(f"{RED}VIGENERE SOLVER{RESET}")
-    print(f"{GREY}================================{RESET}")
+    banner("Vigenere Cipher", "Dictionary attack, annealing and direct decryption")
     
     # 1. Get Initial Inputs
     ciphertexts = get_input_ciphertexts(prompt="Enter ciphertext")

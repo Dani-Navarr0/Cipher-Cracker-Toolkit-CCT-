@@ -3,12 +3,7 @@ import datetime
 import re
 
 # ANSI color codes for terminal output
-RED = '\033[38;5;88m'
-YELLOW = '\033[38;5;3m'
-GREY = '\033[38;5;238m'
-RESET = '\033[0m'
-GREEN = '\033[38;5;2m'
-BLUE = '\033[38;5;4m'
+from theme import RED, GREEN, YELLOW, BLUE, CYAN, GREY, WHITE, RESET, banner
 
 def get_divisors(n):
     """Return all divisors of n."""
@@ -88,9 +83,7 @@ def process_string(input_string, output_file="matrix_outputs.txt"):
         return False
 
 def run():
-    print(f"{GREEN}===================================={RESET}")
-    print(f"{GREEN}=   Matrix String Processor Tool   ={RESET}")
-    print(f"{GREEN}===================================={RESET}")
+    banner("Matrix Generator", "Write a string into every n x m grid and read it back")
     
     input_mode = input(f"\n{GREY}Input mode ({RESET}{YELLOW}1 = Direct input{RESET}{GREY},{RESET} {YELLOW}2 = From file{RESET}{GREY}): {RESET}")
     

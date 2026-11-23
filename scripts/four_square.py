@@ -6,7 +6,7 @@ from collections import Counter
 from utils.utils import get_input_ciphertexts
 from ngram_scoring import DEFAULT_NGRAM_PATH, load_ngram_scores, score_text
 
-RESET, GREEN, YELLOW, RED, GREY = '\033[0m', '\033[32m', '\033[33m', '\033[31m', '\033[90m'
+from theme import RED, GREEN, YELLOW, BLUE, CYAN, GREY, WHITE, RESET, banner
 ALPHABET = "ABCDEFGHIKLMNOPQRSTUVWXYZ" # J is typically omitted
 ngram_path = DEFAULT_NGRAM_PATH
 
@@ -101,7 +101,7 @@ def run_sa(ciphertext, expected_freqs, config):
     print(f"Plaintext:\n{best_plaintext}\n")
 
 def run():
-    print(f"{GREY}================================{RESET}\n{RED}FOUR-SQUARE SOLVER{RESET}\n{GREY}================================{RESET}")
+    banner("Four-Square Cipher", "Direct decryption or simulated annealing")
     ciphers = get_input_ciphertexts()
     if not ciphers: return
     

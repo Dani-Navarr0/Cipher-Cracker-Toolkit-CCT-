@@ -1,6 +1,7 @@
 import os
-import numpy as np
+import heapq
 import itertools
+import math
 import time
 import sys
 from functools import lru_cache
@@ -42,12 +43,7 @@ class DummyUtils:
 utils = DummyUtils()
 
 # --- COLOR CODES AND PATHS ---
-RED = '\033[38;5;88m'
-YELLOW = '\033[38;5;3m'
-GREY = '\033[38;5;238m'
-RESET = '\033[0m'
-GREEN = '\033[38;5;2m'
-BLUE = '\033[38;5;4m'
+from theme import RED, GREEN, YELLOW, BLUE, CYAN, GREY, WHITE, RESET, banner
 
 data_dir = os.path.join(os.path.dirname(__file__), "data")
 ngram_path = DEFAULT_NGRAM_PATH
@@ -71,53 +67,73 @@ def matrix_to_key(matrix, alphabet):
 def key_to_matrix(key, matrix_size, alphabet):
     required_length = matrix_size * matrix_size
     key_indices = [alphabet.index(c) for c in key[:required_length] if c in alphabet]
-    return np.array(key_indices).reshape(matrix_size, matrix_size)
+    return [key_indices[row * matrix_size:(row + 1) * matrix_size] for row in range(matrix_size)]
+
+# Matrices are plain lists/tuples of integer rows. Exact integer arithmetic
+# (no floating-point determinant rounding) and no numpy dependency.
+
+def determinant(matrix) -> int:
+    size = len(matrix)
+    if size == 1:
+        return matrix[0][0]
+    if size == 2:
+        return matrix[0][0] * matrix[1][1] - matrix[0][1] * matrix[1][0]
+    return sum(
+        (-1) ** column * matrix[0][column] * determinant([row[:column] + row[column + 1:] for row in matrix[1:]])
+        for column in range(size)
+    )
 
 def modular_inverse(matrix, modulus):
-    """
-    Calculates the modular inverse of a matrix using the Adjugate Matrix method.
-    This logic is based on the provided PDF for mathematical accuracy. 
-    """
-    det = int(round(np.linalg.det(matrix)))
-    det = det % modulus
-    
+    """Modular inverse via the adjugate: inv = det^-1 * adj(M) (mod m)."""
+    matrix = [list(row) for row in matrix]
+    size = len(matrix)
     try:
-        det_inv = pow(det, -1, modulus)
+        det_inv = pow(determinant(matrix) % modulus, -1, modulus)
     except ValueError:
-        return None # Determinant is not invertible, no inverse exists. [cite: 358, 359, 360]
+        return None  # Determinant not invertible mod m: no inverse exists.
+    if size == 1:
+        return [[det_inv]]
+    # adj[c][r] = cofactor(r, c)
+    return [
+        [
+            det_inv * (-1) ** (r + c) * determinant(
+                [row[:c] + row[c + 1:] for i, row in enumerate(matrix) if i != r]
+            ) % modulus
+            for r in range(size)
+        ]
+        for c in range(size)
+    ]
 
-    n = matrix.shape[0]
-    cofactors = np.zeros(matrix.shape)
-    for r in range(n):
-        for c in range(n):
-            minor = np.delete(np.delete(matrix, r, axis=0), c, axis=1)
-            cofactors[r, c] = ((-1)**(r + c)) * int(round(np.linalg.det(minor)))
-    
-    adjugate = cofactors.T
-    inv_matrix = (det_inv * adjugate) % modulus
-    return inv_matrix.astype(int)
+def multiply_mod(left, right, modulus):
+    return [
+        [sum(left[r][k] * right[k][c] for k in range(len(right))) % modulus for c in range(len(right[0]))]
+        for r in range(len(left))
+    ]
+
+def decrypt_with_inverse(cipher_indices, inverse_matrix, alphabet):
+    """Decrypt pre-filtered, padded ciphertext indices with an inverse key."""
+    size = len(inverse_matrix)
+    modulus = len(alphabet)
+    rows = [tuple(row) for row in inverse_matrix]
+    out = []
+    append = out.append
+    for i in range(0, len(cipher_indices), size):
+        chunk = cipher_indices[i:i + size]
+        for row in rows:
+            append(alphabet[sum(a * b for a, b in zip(row, chunk)) % modulus])
+    return "".join(out)
+
+def prepare_ciphertext(ciphertext, alphabet, matrix_size):
+    indices = [alphabet.index(c) for c in ciphertext if c in alphabet]
+    while len(indices) % matrix_size != 0:
+        indices.append(0)  # pad with alphabet[0], as before
+    return indices
 
 def decrypt_hill(ciphertext, key_matrix, alphabet):
-    """
-    Decrypts Hill cipher using the correct column vector method. [cite: 332, 342]
-    """
-    matrix_size = key_matrix.shape[0]
-    modulus = len(alphabet)
-    inverse_matrix = modular_inverse(key_matrix, modulus)
+    """Decrypts Hill cipher using the column vector method."""
+    inverse_matrix = modular_inverse(key_matrix, len(alphabet))
     if inverse_matrix is None: return None
-    
-    plaintext = ""
-    filtered_ciphertext = [c for c in ciphertext if c in alphabet]
-    while len(filtered_ciphertext) % matrix_size != 0:
-        filtered_ciphertext.append(alphabet[0])
-        
-    for i in range(0, len(filtered_ciphertext), matrix_size):
-        chunk = filtered_ciphertext[i:i+matrix_size]
-        chunk_vector = np.array([alphabet.index(c) for c in chunk])
-        decrypted_vector = np.dot(inverse_matrix, chunk_vector) % modulus
-        for idx in decrypted_vector:
-            plaintext += alphabet[int(idx)]
-    return plaintext
+    return decrypt_with_inverse(prepare_ciphertext(ciphertext, alphabet, len(key_matrix)), inverse_matrix, alphabet)
 
 def highlight_phrases(text: str, phrases: list) -> str:
     highlighted_text = text.lower()
@@ -131,13 +147,13 @@ def contains_fragment(plaintext, fragment):
     return fragment.lower().replace(" ", "") in plaintext.lower().replace(" ", "")
 
 def is_valid_key_matrix(matrix, modulus):
-    det = int(round(np.linalg.det(matrix))) % modulus
-    return det != 0 and np.gcd(det, modulus) == 1
+    det = determinant(matrix) % modulus
+    return det != 0 and math.gcd(det, modulus) == 1
 
 def generate_all_possible_matrices(matrix_size, alphabet_length):
     value_range = range(alphabet_length)
     for values in itertools.product(value_range, repeat=matrix_size*matrix_size):
-        matrix = np.array(values).reshape(matrix_size, matrix_size)
+        matrix = [list(values[row * matrix_size:(row + 1) * matrix_size]) for row in range(matrix_size)]
         if is_valid_key_matrix(matrix, alphabet_length):
             yield matrix
 
@@ -152,40 +168,46 @@ def brute_force_hill_all_keys(ciphertext, alphabet, matrix_size, min_ioc, max_io
     last_update_time = start_time
     matrices_checked = 0
 
+    cipher_indices = prepare_ciphertext(ciphertext, alphabet, matrix_size)
+    # Keep every fragment match plus the best `max_results` keys by n-gram
+    # cost. (Previously the search kept only IoC-window matches and stopped at
+    # the first max_results in enumeration order, which can miss the real key.)
+    fragment_results = []
+    best_heap = []  # max-heap on cost via negation: (-cost, counter, result)
     for matrix in generate_all_possible_matrices(matrix_size, len(alphabet)):
         matrices_checked += 1
-        
-        current_time = time.time()
-        if current_time - last_update_time >= 2:
-            elapsed_time = current_time - start_time
-            print(f"{GREY}Matrices tested: {matrices_checked:,} | Time: {elapsed_time:.1f}s | Matches: {len(results)}{RESET}", end='\r')
-            last_update_time = current_time
 
-        plaintext = decrypt_hill(ciphertext, matrix, alphabet)
-        if not plaintext: continue
-        
-        is_fragment_match = any(contains_fragment(plaintext, f) for f in known_fragments) if known_fragments else False
+        if matrices_checked % 4096 == 0:
+            current_time = time.time()
+            if current_time - last_update_time >= 2:
+                print(f"{GREY}Matrices tested: {matrices_checked:,} | Time: {current_time - start_time:.1f}s{RESET}", end='\r')
+                last_update_time = current_time
+
+        inverse_matrix = modular_inverse(matrix, len(alphabet))
+        if inverse_matrix is None: continue
+        plaintext = decrypt_with_inverse(cipher_indices, inverse_matrix, alphabet)
+        bigram_score = calculate_bigram_score(plaintext, expected_freqs)
+        matched = [f for f in known_fragments if contains_fragment(plaintext, f)] if known_fragments else []
+
+        if not matched and len(best_heap) >= max_results and -best_heap[0][0] <= bigram_score:
+            continue
         ioc = utils.calculate_ioc(plaintext)
-        is_ioc_match = min_ioc <= ioc <= max_ioc
-        
-        if is_fragment_match or is_ioc_match:
-            bigram_score = calculate_bigram_score(plaintext, expected_freqs)
-            results.append({
-                'key_rep': matrix_to_key(matrix, alphabet), 'matrix': matrix, 'plaintext': plaintext,
-                'ioc': ioc, 'bigram_score': bigram_score, 'is_fragment_match': is_fragment_match,
-                'matched_fragments': [f for f in known_fragments if contains_fragment(plaintext, f)] if is_fragment_match else []
-            })
+        result = {
+            'key_rep': matrix_to_key(matrix, alphabet), 'matrix': matrix, 'plaintext': plaintext,
+            'ioc': ioc, 'bigram_score': bigram_score, 'is_fragment_match': bool(matched),
+            'matched_fragments': matched
+        }
+        if matched:
+            fragment_results.append(result)
+        elif len(best_heap) < max_results:
+            heapq.heappush(best_heap, (-bigram_score, matrices_checked, result))
+        else:
+            heapq.heapreplace(best_heap, (-bigram_score, matrices_checked, result))
 
-        if len(results) >= max_results:
-            print(f"\n{YELLOW}Maximum number of results ({max_results}) reached. Stopping search.{RESET}")
-            break
-
+    results = fragment_results + [entry[2] for entry in best_heap]
     print(f"\n\n{GREY}Completed! {matrices_checked:,} valid matrices tested.{RESET}")
-    
-    results.sort(key=lambda x: (
-        0 if x['is_fragment_match'] else 1, 0 if min_ioc <= x['ioc'] <= max_ioc else 1,
-        x['bigram_score'], -x['ioc']
-    ))
+
+    results.sort(key=lambda x: (0 if x['is_fragment_match'] else 1, x['bigram_score'], -x['ioc']))
     return results
 
 def known_plaintext_attack_hill(full_ciphertext, alphabet):
@@ -211,8 +233,9 @@ def known_plaintext_attack_hill(full_ciphertext, alphabet):
     p_indices = [alphabet.index(c) for c in plain_input]
     c_indices = [alphabet.index(c) for c in cipher_input]
     
-    p_matrix = np.array(p_indices).reshape(3, 3, order='F')
-    c_matrix = np.array(c_indices).reshape(3, 3, order='F')
+    # Column-major fill: each 3-letter block is one column vector.
+    p_matrix = [[p_indices[col * 3 + row] for col in range(3)] for row in range(3)]
+    c_matrix = [[c_indices[col * 3 + row] for col in range(3)] for row in range(3)]
 
     print(f"\n{GREY}Plaintext Matrix (P):\n{p_matrix}{RESET}")
     
@@ -223,7 +246,7 @@ def known_plaintext_attack_hill(full_ciphertext, alphabet):
         print(f"{YELLOW}Please try a different 9-character segment of known plaintext.{RESET}")
         return
 
-    key_matrix = np.dot(c_matrix, p_inverse) % modulus
+    key_matrix = multiply_mod(c_matrix, p_inverse, modulus)
     
     print(f"\n{GREEN}Success! Key matrix found:{RESET}")
     for row in key_matrix:
@@ -233,7 +256,7 @@ def known_plaintext_attack_hill(full_ciphertext, alphabet):
     print(f"\n{GREEN}Key Representation:{RESET} {YELLOW}{key_rep}{RESET}")
 
     if input(f"\n{GREY}Decrypt the full ciphertext with this key to verify? (y/n): {RESET}").lower() == 'y':
-        plaintext = decrypt_hill(full_ciphertext, key_matrix, alphabet)
+        plaintext = decrypt_hill(normalize_input(full_ciphertext, alphabet), key_matrix, alphabet)
         print(f"\n{YELLOW}--- Full Decryption ---{RESET}")
         print(plaintext.lower())
 
@@ -257,7 +280,7 @@ def decrypt_with_specific_key():
     
     matrix = None
     if key_input_method == '1':
-        matrix = np.zeros((matrix_size, matrix_size), dtype=int)
+        matrix = [[0] * matrix_size for _ in range(matrix_size)]
         for i in range(matrix_size):
             row_input = input(f"Row {i+1} (space-separated): ")
             values = row_input.split()
@@ -301,9 +324,7 @@ def decrypt_with_specific_key():
         print(f"{RED}Decryption failed.{RESET}")
 
 def run():
-    print(f"{GREEN}==============={RESET}")
-    print(f"{GREEN}= Hill Cipher ={RESET}")
-    print(f"{GREEN}==============={RESET}")
+    banner("Hill Cipher", "Matrix cipher: direct decryption, brute force, known plaintext")
     
     print(f"\n{YELLOW}Select mode:{RESET}")
     print(f"1. Direct decryption with a known key")
@@ -376,7 +397,7 @@ def run():
                 
                 print(f"{GREY}-{RESET}" * 50)
                 print(f"Rank #{i+1}: Key: {YELLOW}{result['key_rep']}{RESET}{fragment_marker}")
-                print(f"Matrix: {result['matrix'].flatten().tolist()}")
+                print(f"Matrix: {[value for row in result['matrix'] for value in row]}")
                 print(f"Scores: IoC: {YELLOW}{result['ioc']:.4f}{RESET}{range_marker} | N-gram: {YELLOW}{result['bigram_score']:.2f}{RESET} (Lower is better)")
                 print(f"Plaintext: {highlighted}")
             

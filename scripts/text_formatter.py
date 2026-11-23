@@ -1,9 +1,7 @@
-RED, YELLOW, GREY, RESET, GREEN = '\033[38;5;88m', '\033[38;5;3m', '\033[38;5;238m', '\033[0m', '\033[38;5;2m'
+from theme import RED, GREEN, YELLOW, BLUE, CYAN, GREY, WHITE, RESET, banner
 
 def run():
-    print(f"{GREEN}===================================={RESET}")
-    print(f"{GREEN}====  Crypto Text Pre-Processor ===={RESET}")
-    print(f"{GREEN}===================================={RESET}")
+    banner("Text Formatter", "Clean and reshape ciphertext")
     
     text = input(f"{GREY}Enter text to format: {RESET}")
     if not text: return

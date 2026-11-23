@@ -4,12 +4,7 @@ import re
 from utils import utils
 
 # ANSI color codes for terminal output
-RED = '\033[38;5;88m'
-YELLOW = '\033[38;5;3m'
-GREY = '\033[38;5;238m'
-RESET = '\033[0m'
-GREEN = '\033[38;5;2m'
-BLUE = '\033[38;5;4m'
+from theme import RED, GREEN, YELLOW, BLUE, CYAN, GREY, WHITE, RESET, banner
 
 # Hardcoded path for words_alpha.txt
 WORDLIST_PATH = os.path.join(os.path.dirname(__file__), "data", "words_alpha.txt")
@@ -174,9 +169,7 @@ def brute_force_with_ioc(ciphertext, operation, modulus, base_index, custom_alph
     return results
 
 def run():
-    print(f"{RED}=============================================={RESET}")
-    print(f"{RED}= Modular Addition/Subtraction Cipher Tool  ={RESET}")
-    print(f"{RED}=============================================={RESET}")
+    banner("Modular Add / Subtract", "Combine text with a key by modular arithmetic")
     
     # Ask if user wants to use a custom alphabet
     custom_alphabet_option = input(f"\n{GREY}Use custom alphabet? (y/n): {RESET}").lower()

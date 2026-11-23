@@ -1,4 +1,4 @@
-RED, YELLOW, GREY, RESET, GREEN = '\033[38;5;88m', '\033[38;5;3m', '\033[38;5;238m', '\033[0m', '\033[38;5;2m'
+from theme import RED, GREEN, YELLOW, BLUE, CYAN, GREY, WHITE, RESET, banner
 
 def decrypt_rail_fence(ciphertext, rails):
     if rails <= 1: return ciphertext
@@ -37,9 +37,7 @@ def decrypt_rail_fence(ciphertext, rails):
     return "".join(result)
 
 def run():
-    print(f"{GREEN}===================================={RESET}")
-    print(f"{GREEN}=====     Rail Fence Cipher    ====={RESET}")
-    print(f"{GREEN}===================================={RESET}")
+    banner("Rail Fence Cipher", "Zig-zag transposition across N rails")
     
     ciphertext = input(f"{GREY}Enter ciphertext: {RESET}").upper()
     if not ciphertext: return

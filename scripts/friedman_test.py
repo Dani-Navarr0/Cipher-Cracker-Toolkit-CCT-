@@ -1,4 +1,4 @@
-RED, YELLOW, GREY, RESET, GREEN = '\033[38;5;88m', '\033[38;5;3m', '\033[38;5;238m', '\033[0m', '\033[38;5;2m'
+from theme import RED, GREEN, YELLOW, BLUE, CYAN, GREY, WHITE, RESET, banner
 
 def calculate_ioc(text):
     text = ''.join(filter(str.isalpha, text.upper()))
@@ -9,9 +9,7 @@ def calculate_ioc(text):
     return numerator / (n * (n - 1))
 
 def run():
-    print(f"{GREEN}===================================={RESET}")
-    print(f"{GREEN}=====      Friedman Test       ====={RESET}")
-    print(f"{GREEN}===================================={RESET}")
+    banner("Friedman Test", "Estimate a polyalphabetic key length from the IoC")
     
     text = input(f"{GREY}Enter ciphertext: {RESET}")
     text = ''.join(filter(str.isalpha, text.upper()))

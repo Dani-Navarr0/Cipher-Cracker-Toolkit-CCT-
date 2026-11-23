@@ -12,18 +12,16 @@ from ngram_scoring import (
     _NGRAM_FILES,
     add_spaces,
     available_spacing_models,
+    codes_to_text,
     load_spacing_model,
     load_ngram_scores,
+    ngram_total,
     resolve_ngram_path,
+    text_to_codes,
 )
 
 # ANSI Colors
-RED = '\033[38;5;88m'
-YELLOW = '\033[38;5;3m'
-GREY = '\033[38;5;238m'
-RESET = '\033[0m'
-GREEN = '\033[38;5;2m'
-CYAN = '\033[38;5;6m'
+from theme import RED, GREEN, YELLOW, BLUE, CYAN, GREY, WHITE, RESET, banner
 
 ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 
@@ -136,6 +134,19 @@ def decrypt_substitution(ciphertext: str, key: str) -> str:
     return ciphertext.translate(translation_table)
 
 
+def ioc_penalty_for(text_ioc: float, min_ioc: float, max_ioc: float) -> float:
+    if min_ioc <= text_ioc <= max_ioc:
+        return 0.0
+    if text_ioc < min_ioc:
+        return min_ioc - text_ioc
+    return text_ioc - max_ioc
+
+
+def letter_entropy(letters) -> float:
+    total = len(letters)
+    return sum(abs(math.log2(count / total) * (count / total)) for count in Counter(letters).values())
+
+
 def calculate_fitness(
     text: str,
     ngram_model,
@@ -149,14 +160,7 @@ def calculate_fitness(
     Returns (fitness_score, ioc_val).
     """
     text_ioc = calculate_ioc(text)
-    
-    # Calculate IoC penalty distance
-    if min_ioc <= text_ioc <= max_ioc:
-        ioc_penalty = 0.0
-    elif text_ioc < min_ioc:
-        ioc_penalty = min_ioc - text_ioc
-    else:
-        ioc_penalty = text_ioc - max_ioc
+    ioc_penalty = ioc_penalty_for(text_ioc, min_ioc, max_ioc)
 
     if scoring_mode == '2':
         # Pure IoC: maximize score by minimizing penalty
@@ -165,27 +169,14 @@ def calculate_fitness(
     # Calculate standard N-Gram Likelihood * Entropy
     scores = ngram_model.scores
     ngram_size = ngram_model.size
-    letters = "".join(char for char in text.upper() if "A" <= char <= "Z")
+    letters = text_to_codes(text)
     al = len(letters) - ngram_size + 1
-    
+
     if al <= 0:
         return -9999.0, text_ioc
 
-    total_score = 0
-    if isinstance(scores, (bytes, bytearray)):
-        for index in range(al):
-            ngram_index = 0
-            for char in letters[index:index + ngram_size]:
-                ngram_index = ngram_index * 26 + ord(char) - ord("A")
-            total_score += scores[ngram_index]
-    else:
-        for index in range(al):
-            total_score += scores.get(letters[index:index + ngram_size], 0)
-
-    L = len(letters)
-    freqs = Counter(letters)
-    entropy = sum(abs(math.log2(count / L) * (count / L)) for count in freqs.values())
-    mean_score = (total_score / al) * (entropy ** ent_weight)
+    total_score = ngram_total(letters, scores, ngram_size)
+    mean_score = (total_score / al) * (letter_entropy(letters) ** ent_weight)
 
     if scoring_mode == '3':
         # Combined: reward falling inside IoC range, penalize outside
@@ -213,50 +204,84 @@ def run_simulated_annealing(
     min_ioc: float,
     max_ioc: float
 ) -> Tuple[str, float, float, str]:
-    current_key = "".join(random.sample(ALPHABET, 26))
-    current_text = decrypt_substitution(ciphertext, current_key)
-    current_score, current_ioc = calculate_fitness(current_text, ngram_model, ent_weight, scoring_mode, min_ioc, max_ioc)
-    
-    best_key = current_key
+    # A substitution key is a bijection on A-Z, so it only relabels letter
+    # counts: the IoC and letter entropy of every candidate plaintext equal
+    # those of the ciphertext. Compute them once instead of on every step.
+    # (Same arithmetic as calculate_fitness, so scores are bit-identical.)
+    cipher_codes = text_to_codes(ciphertext)
+    ngram_size = ngram_model.size
+    scores = ngram_model.scores
+    ngram_count = len(cipher_codes) - ngram_size + 1
+    text_ioc = calculate_ioc(ciphertext)
+    ioc_penalty = ioc_penalty_for(text_ioc, min_ioc, max_ioc)
+    if scoring_mode == '2' or ngram_count <= 0:
+        constant = -(ioc_penalty * 1000.0) if scoring_mode == '2' else -9999.0
+        def fitness(plain_codes):
+            return constant
+    else:
+        entropy_factor = letter_entropy(cipher_codes) ** ent_weight
+        ioc_factor = (1.0 - (ioc_penalty * 20.0)) if scoring_mode == '3' else None
+        def fitness(plain_codes):
+            mean_score = (ngram_total(plain_codes, scores, ngram_size) / ngram_count) * entropy_factor
+            return mean_score if ioc_factor is None else mean_score * ioc_factor
+
+    # key[p] is the cipher letter code that decrypts to plaintext letter p;
+    # table[c] is its inverse, used with bytes.translate to decrypt in C.
+    key = [ord(char) - 65 for char in random.sample(ALPHABET, 26)]
+    table = bytearray(range(256))
+    for plain, cipher in enumerate(key):
+        table[cipher] = plain
+    present = set(cipher_codes)
+
+    def key_string(key_codes):
+        return "".join(chr(code + 65) for code in key_codes)
+
+    current_score = fitness(cipher_codes.translate(table))
+    current_ioc = text_ioc
+    best_key = key_string(key)
     best_score = current_score
     best_ioc = current_ioc
-    
+
     temp = starting_temp
     iteration = 0
     start_time = time.time()
-    
+    sample = random.sample
+    rand = random.random
+    exp = math.exp
+    positions = range(26)
+
     print(f"\n{YELLOW}Starting Simulated Annealing (Substitution)...{RESET}")
     print(f"{GREY}Starting Temp: {temp} | Cooling Rate: {cooling_rate} | Steps/Temp: {steps_per_temp}{RESET}\n")
 
     try:
         while temp > 0.1:
             for _ in range(steps_per_temp):
-                new_key = modify_key(current_key)
-                new_text = decrypt_substitution(ciphertext, new_key)
-                new_score, new_ioc = calculate_fitness(new_text, ngram_model, ent_weight, scoring_mode, min_ioc, max_ioc)
-                
+                # Same random calls, in the same order, as the original
+                # modify_key + accept loop, so seeded runs are reproducible.
+                idx1, idx2 = sample(positions, 2)
+                cipher1, cipher2 = key[idx1], key[idx2]
+                key[idx1], key[idx2] = cipher2, cipher1
+                table[cipher1], table[cipher2] = idx2, idx1
+                if cipher1 in present or cipher2 in present:
+                    new_score = fitness(cipher_codes.translate(table))
+                else:
+                    new_score = current_score  # Neither letter occurs: plaintext unchanged.
+
                 score_diff = new_score - current_score
-                
                 if score_diff > 0:
-                    current_key = new_key
                     current_score = new_score
-                    current_ioc = new_ioc
-                    
                     if new_score > best_score:
                         best_score = new_score
-                        best_key = new_key
-                        best_ioc = new_ioc
-                        
-                elif temp > 0:
-                    probability = math.exp(score_diff / temp) 
-                    if random.random() < probability:
-                        current_key = new_key
-                        current_score = new_score
-                        current_ioc = new_ioc
-            
+                        best_key = key_string(key)
+                elif temp > 0 and rand() < exp(score_diff / temp):
+                    current_score = new_score
+                else:
+                    key[idx1], key[idx2] = cipher1, cipher2
+                    table[cipher1], table[cipher2] = idx1, idx2
+
             temp *= cooling_rate
             iteration += 1
-            
+
             if iteration % 10 == 0:
                 sample_text = decrypt_substitution(ciphertext, best_key).replace('\n', ' ')[:35]
                 print(f"Temp: {temp:>5.2f} | Best Score: {GREEN}{best_score:>8.2f}{RESET} | IoC: {YELLOW}{best_ioc:.4f}{RESET} | Text: {sample_text}...", end='\r')
@@ -296,10 +321,7 @@ def save_results_to_file(results: List[Dict], filename: str, numeric_mapping=Non
 
 
 def run():
-    print(f"{GREEN}===================================={RESET}")
-    print(f"{GREEN}=====    Simulated Annealing   ====={RESET}")
-    print(f"{GREEN}=====      (Substitution)      ====={RESET}")
-    print(f"{GREEN}===================================={RESET}")
+    banner("Simulated Annealing: Substitution", "Breaks simple substitution with n-gram scoring")
     
     ciphertext_input = input(f"{GREY}Enter substitution ciphertext: {RESET}").upper()
     if not ciphertext_input:
@@ -326,6 +348,19 @@ def run():
         min_ioc = float(min_in) if min_in else 0.060
         max_in = input(f"Enter target MAX IoC (default {YELLOW}0.070{RESET}): ").strip()
         max_ioc = float(max_in) if max_in else 0.070
+
+    # Simple substitution cannot change the IoC (it only relabels letters), so
+    # every key has the ciphertext's IoC. Pure-IoC mode would score all keys
+    # equally (a random walk), and in combined mode the IoC term is a constant
+    # factor that, if <= 0, would make the search minimise English-likeness.
+    cipher_ioc = calculate_ioc(ciphertext)
+    print(f"{GREY}Ciphertext IoC: {YELLOW}{cipher_ioc:.4f}{GREY} (unchanged by any substitution key){RESET}")
+    if scoring_mode == '2':
+        print(f"{YELLOW}Pure IoC cannot rank substitution keys; using Combined mode instead.{RESET}")
+        scoring_mode = '3'
+    if scoring_mode == '3' and 1.0 - ioc_penalty_for(cipher_ioc, min_ioc, max_ioc) * 20.0 <= 0:
+        print(f"{YELLOW}IoC is far outside the target range; using Pure N-Grams so the search is not inverted.{RESET}")
+        scoring_mode = '1'
 
     print(f"\n{GREY}Configure Simulated Annealing Parameters:{RESET}")
     

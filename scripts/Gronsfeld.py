@@ -7,6 +7,8 @@ import random
 import math
 import time
 from collections import Counter
+from annealing import Schedule
+from periodic_solver import solve_periodic
 from ngram_scoring import DEFAULT_NGRAM_PATH, DEFAULT_NGRAM_SIZE, load_ngram_scores, resolve_ngram_path, score_text
 
 # --- DUMMY UTILS CLASS ---
@@ -56,7 +58,7 @@ class DummyUtils:
 utils = DummyUtils()
 
 # --- COLOR CODES AND PATHS ---
-RESET, GREEN, YELLOW, RED, BLUE, CYAN, GREY = '\033[0m', '\033[32m', '\033[33m', '\033[31m', '\033[34m', '\033[36m', '\033[90m'
+from theme import RED, GREEN, YELLOW, BLUE, CYAN, GREY, WHITE, RESET, banner
 
 data_dir = os.path.join(os.path.dirname(__file__), "data")
 ngram_path = DEFAULT_NGRAM_PATH
@@ -83,11 +85,13 @@ def gronsfeld_decrypt(ciphertext: str, key: str, alphabet: str) -> str:
     alphabet_length = len(alphabet)
     key_digits = [int(d) for d in key]
 
-    for i, char in enumerate(ciphertext):
+    key_position = 0  # Advances only on enciphered letters, not spaces/punctuation.
+    for char in ciphertext:
         char_upper = char.upper()
         if char_upper in alphabet:
             char_index = alphabet.index(char_upper)
-            shift = key_digits[i % key_length]
+            shift = key_digits[key_position % key_length]
+            key_position += 1
             decrypted_index = (char_index - shift + alphabet_length) % alphabet_length
             decrypted_char = alphabet[decrypted_index]
             decrypted_text.append(decrypted_char.lower())
@@ -162,90 +166,45 @@ def generate_neighbor_numeric_key(key: str) -> str:
     return "".join(key_list)
 
 def run_simulated_annealing_attack(ciphertext: str, alphabet: str, config: Dict):
+    """Anneal the numeric key with the shared engine (geometric 20 -> 0.1).
+
+    The previous loop started at temperature 1000 on a 0-255 cost scale, so
+    most of its iterations were a random walk.
+    """
     key_length = config.get('key_length', 5)
     iterations = config.get('iterations', 200000)
-    initial_temp = config.get('temp', 1000.0)
-    cooling_rate = config.get('cooling_rate', 0.99995)
-    
+    restarts = config.get('restarts', 5)
     scoring_mode = config.get('scoring_mode', '3')
     ngram_size = config.get('ngram_size', DEFAULT_NGRAM_SIZE)
-    target_min_ioc = config.get('min_ioc', 0.060)
-    target_max_ioc = config.get('max_ioc', 0.070)
-    
-    freq_path = resolve_ngram_path(ngram_size)
-    expected_freqs = load_ngram_frequencies(freq_path)
+    ioc_range = (config.get('min_ioc', 0.060), config.get('max_ioc', 0.070))
+    model = load_ngram_frequencies(resolve_ngram_path(ngram_size))
 
-    # TOP 5 TRACKER
-    top_results = []
-    def add_to_top(k, s, t):
-        if not any(r['key'] == k for r in top_results):
-            top_results.append({'key': k, 'score': s, 'text': t})
-            top_results.sort(key=lambda x: x['score'])
-            if len(top_results) > 5:
-                top_results.pop()
-
-    # DYNAMIC FITNESS ENGINE
-    def get_ioc_penalty(text_ioc: float) -> float:
-        if target_min_ioc <= text_ioc <= target_max_ioc: return 0.0
-        elif text_ioc < target_min_ioc: return target_min_ioc - text_ioc
-        else: return text_ioc - target_max_ioc
-
-    def evaluate_fitness(text: str) -> float:
-        if scoring_mode == '1': 
-            return calculate_ngram_score(text, expected_freqs, ngram_size)
-            
-        text_ioc = utils.calculate_ioc(text)
-        ioc_penalty = get_ioc_penalty(text_ioc)
-
-        if scoring_mode == '2': 
-            return ioc_penalty * 1000 
-        else: 
-            ngram_score = calculate_ngram_score(text, expected_freqs, ngram_size)
-            return ngram_score * (1.0 + (ioc_penalty * 50))
-
-    print(f"\n{BLUE}--- Simulated Annealing Engine ({'Combined' if scoring_mode == '3' else 'IoC' if scoring_mode == '2' else 'N-Gram'} Scoring) ---{RESET}")
+    label = 'Combined' if scoring_mode == '3' else 'IoC' if scoring_mode == '2' else 'N-Gram'
+    print(f"\n{BLUE}--- Simulated Annealing Engine ({label} Scoring, {restarts} restarts x {iterations:,} steps) ---{RESET}")
     if scoring_mode in ['2', '3']:
-        print(f"{GREY}Target IoC Range: {target_min_ioc:.4f} - {target_max_ioc:.4f}{RESET}")
+        print(f"{GREY}Target IoC Range: {ioc_range[0]:.4f} - {ioc_range[1]:.4f}{RESET}")
 
-    current_key = "".join(str(random.randint(0, 9)) for _ in range(key_length))
-    current_text = gronsfeld_decrypt(ciphertext, current_key, alphabet)
-    current_score = evaluate_fitness(current_text)
-    
-    best_key, best_score = current_key, current_score
-    add_to_top(current_key, current_score, current_text)
-    
-    try:
-        temp = initial_temp
-        for i in range(iterations):
-            temp *= cooling_rate
-            if temp <= 0: break
-            
-            neighbor_key = generate_neighbor_numeric_key(current_key)
-            neighbor_text = gronsfeld_decrypt(ciphertext, neighbor_key, alphabet)
-            neighbor_score = evaluate_fitness(neighbor_text)
-            
-            delta = neighbor_score - current_score
-            if delta < 0 or random.random() < math.exp(-delta / temp):
-                current_key, current_score, current_text = neighbor_key, neighbor_score, neighbor_text
-                
-                # Check if it makes the Top 5
-                if len(top_results) < 5 or current_score < top_results[-1]['score']:
-                    add_to_top(current_key, current_score, current_text)
+    results = solve_periodic(
+        ciphertext, alphabet, "0123456789", key_length,
+        lambda c, d, m: (c - d) % m,            # Gronsfeld: P = C - digit
+        model, Schedule(iterations), restarts=restarts,
+        ioc_range=ioc_range, scoring_mode=scoring_mode,
+    )
+    if results is None:
+        print(f"{RED}Annealing needs an alphabet that is a permutation of A-Z.{RESET}")
+        return
 
-                if current_score < best_score:
-                    best_key, best_score = current_key, current_score
-                    display_text = current_text.replace('\n', ' ')[:35]
-                    print(f"Score: {best_score:<8.2f} | Key: {best_key} | Text: {display_text}...", end='\r')
-
-        print("\n" + "="*80)
-        print(f"\n{YELLOW}--- TOP 5 RANKED SOLUTIONS ---{RESET}")
-        for i, res in enumerate(top_results):
-            print(f"Rank #{i+1}: Key: {YELLOW}{res['key']}{RESET} | Score: {YELLOW}{res['score']:.2f}{RESET} | IoC: {YELLOW}{utils.calculate_ioc(res['text']):.4f}{RESET}")
-            print(f"Text: {res['text'].lower()}")
-            print("-" * 60)
-
-    except KeyboardInterrupt:
-        print("\n\nProcess interrupted by user.")
+    print("\n" + "="*80)
+    print(f"\n{YELLOW}--- TOP RANKED SOLUTIONS (one per restart) ---{RESET}")
+    seen = set()
+    for rank, (key, fitness, _) in enumerate(results, start=1):
+        if key in seen:
+            continue
+        seen.add(key)
+        text = gronsfeld_decrypt(ciphertext, key, alphabet)
+        print(f"Rank #{rank}: Key: {YELLOW}{key}{RESET} | Fitness: {YELLOW}{fitness:.2f}{RESET} (higher is better) | IoC: {YELLOW}{utils.calculate_ioc(text):.4f}{RESET}")
+        print(f"Text: {text.lower()}")
+        print("-" * 60)
 
 # --- MAIN APPLICATION ---
 def run_direct_decrypt(ciphertext: str, alphabet: str):
@@ -257,7 +216,7 @@ def run_direct_decrypt(ciphertext: str, alphabet: str):
     print(f"\nKey: {YELLOW}{key}{RESET}\nDecrypted: {gronsfeld_decrypt(ciphertext, key, alphabet)}")
 
 def run():
-    print(f"{RED}Gronsfeld Cipher Toolkit{RESET}")
+    banner("Gronsfeld Cipher", "Vigenere variant with a numeric key")
     ciphertext = input("\nEnter the ciphertext: ").upper()
     alphabet = input(f"Enter custom alphabet (default: {RED}A-Z{RESET}): ").upper() or "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
     

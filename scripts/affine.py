@@ -34,7 +34,7 @@ class DummyUtils:
 utils = DummyUtils()
 
 # --- COLOR CODES AND PATHS ---
-RED, YELLOW, GREY, GREEN, BLUE, RESET = '\033[38;5;88m', '\033[38;5;3m', '\033[38;5;238m', '\033[38;5;2m', '\033[38;5;21m', '\033[0m'
+from theme import RED, GREEN, YELLOW, BLUE, CYAN, GREY, WHITE, RESET, banner
 try: data_dir = os.path.join(os.path.dirname(__file__), "data")
 except NameError: data_dir = "data"
 
@@ -104,9 +104,7 @@ def brute_force_affine(ciphertext: str, alphabet_str: str, expected_freqs: Dict)
     return results
 
 def run():
-    print(f"{GREEN}===================================={RESET}")
-    print(f"{GREEN}=====       Affine Cipher      ====={RESET}")
-    print(f"{GREEN}===================================={RESET}")
+    banner("Affine Cipher", "E(x) = a*x + b mod m: known key or brute force")
     
     ciphertext = input(f"{GREY}Enter ciphertext: {RESET}")
     if not ciphertext: return

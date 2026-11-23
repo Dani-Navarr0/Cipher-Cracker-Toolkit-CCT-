@@ -43,11 +43,7 @@ class DummyUtils:
 utils = DummyUtils()
 
 # ANSI color codes for terminal output
-RED = '\033[38;5;88m'
-YELLOW = '\033[38;5;3m'
-GREY = '\033[38;5;238m'
-RESET = '\033[0m'
-GREEN = '\033[38;5;2m'
+from theme import RED, GREEN, YELLOW, BLUE, CYAN, GREY, WHITE, RESET, banner
 
 # Default Playfair alphabet
 DEFAULT_ALPHABET = "ABCDEFGHIKLMNOPQRSTUVWXYZ"
@@ -215,10 +211,11 @@ def crack_playfair_memetic(ciphertext: str, bigram_path: str, pop_size: int, gen
 @lru_cache(maxsize=None)
 def create_playfair_matrix(key: str, alphabet: str) -> List[List[str]]:
     matrix_chars = []
-    normalized_key = "".join(char for char in key.upper() if char in alphabet)
-    
-    if len(alphabet) == 25 and 'J' not in alphabet and 'J' in key.upper():
-         normalized_key = normalized_key.replace('J', 'I')
+    key_upper = key.upper()
+    # Merge J into I *before* filtering, otherwise J is dropped as "not in alphabet".
+    if len(alphabet) == 25 and 'J' not in alphabet:
+        key_upper = key_upper.replace('J', 'I')
+    normalized_key = "".join(char for char in key_upper if char in alphabet)
 
     for char in normalized_key:
         if char not in matrix_chars:
@@ -245,10 +242,10 @@ def decrypt_playfair(ciphertext: str, key: str, alphabet: str) -> str:
     char_map = get_char_map(matrix_tuple)
     
     plaintext = []
-    normalized_text = "".join(char for char in ciphertext.upper() if char in alphabet)
-    
+    text_upper = ciphertext.upper()
     if len(alphabet) == 25 and 'J' not in alphabet:
-         normalized_text = normalized_text.replace('J', 'I')
+        text_upper = text_upper.replace('J', 'I')
+    normalized_text = "".join(char for char in text_upper if char in alphabet)
     
     if len(normalized_text) % 2 != 0:
         normalized_text = normalized_text[:-1]
@@ -297,7 +294,7 @@ def load_dictionary(file_path: str, alphabet: str, min_length: int = 3, max_leng
         return []
 
 def contains_all_phrases(text: str, phrases: List[str]) -> bool:
-    if not phrases: return True
+    if not phrases: return False  # No crib given: nothing can "match".
     if not any(char.isalnum() for phrase in phrases for char in phrase): return False
     return all(phrase.upper().replace(" ", "") in text.upper() for phrase in phrases)
 
@@ -425,9 +422,7 @@ def run_direct_decrypt(ciphertext: str, alphabet: str):
         print(f"{RED}Decryption Error: {e}{RESET}")
 
 def run():
-    print(f"""{GREY} 
-    Playfair Cipher{RESET}""")
-    print(f"{GREY}-{RESET}" * 50)
+    banner("Playfair Cipher", "Digraph cipher: dictionary and memetic attacks")
     
     # 1. Ask for Alphabet
     use_custom = input(f"Use custom alphabet? ({YELLOW}Y/N{RESET}): ").upper() == 'Y'

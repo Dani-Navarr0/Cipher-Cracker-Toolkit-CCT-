@@ -1,6 +1,6 @@
 import os
 
-RED, YELLOW, GREY, RESET, GREEN = '\033[38;5;88m', '\033[38;5;3m', '\033[38;5;238m', '\033[0m', '\033[38;5;2m'
+from theme import RED, GREEN, YELLOW, BLUE, CYAN, GREY, WHITE, RESET, banner
 dictionary_path = os.path.join(os.path.dirname(__file__), "data", "words_alpha.txt")
 
 def get_word_pattern(word):
@@ -28,9 +28,7 @@ def load_pattern_dict():
     return patterns
 
 def run():
-    print(f"{GREEN}===================================={RESET}")
-    print(f"{GREEN}====  Word Pattern Isomorphism  ===={RESET}")
-    print(f"{GREEN}===================================={RESET}")
+    banner("Word Pattern Isomorphism", "Match word shapes such as 1-2-2-1 against a dictionary")
     
     ciphertext = input(f"{GREY}Enter ciphertext (MUST contain spaces): {RESET}").upper()
     if not ciphertext.strip(): return

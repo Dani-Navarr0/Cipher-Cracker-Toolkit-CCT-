@@ -1,9 +1,7 @@
-RED, YELLOW, GREY, RESET, GREEN = '\033[38;5;88m', '\033[38;5;3m', '\033[38;5;238m', '\033[0m', '\033[38;5;2m'
+from theme import RED, GREEN, YELLOW, BLUE, CYAN, GREY, WHITE, RESET, banner
 
 def run():
-    print(f"{GREEN}===================================={RESET}")
-    print(f"{GREEN}====   Automated Crib Dragging  ===={RESET}")
-    print(f"{GREEN}===================================={RESET}")
+    banner("Crib Dragging", "Slide a known word across the ciphertext to expose key fragments")
     
     ciphertext = input(f"{GREY}Enter ciphertext: {RESET}")
     ciphertext = "".join(filter(str.isalpha, ciphertext.upper()))

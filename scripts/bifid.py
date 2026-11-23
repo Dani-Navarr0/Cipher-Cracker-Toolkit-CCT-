@@ -1,4 +1,4 @@
-RED, YELLOW, GREY, RESET, GREEN = '\033[38;5;88m', '\033[38;5;3m', '\033[38;5;238m', '\033[0m', '\033[38;5;2m'
+from theme import RED, GREEN, YELLOW, BLUE, CYAN, GREY, WHITE, RESET, banner
 
 def build_square(key=""):
     alphabet = "ABCDEFGHIKLMNOPQRSTUVWXYZ"
@@ -41,9 +41,7 @@ def decrypt_bifid(text, key):
     return plaintext
 
 def run():
-    print(f"{GREEN}===================================={RESET}")
-    print(f"{GREEN}=====       Bifid Cipher       ====={RESET}")
-    print(f"{GREEN}===================================={RESET}")
+    banner("Bifid Cipher", "Polybius-square fractionation cipher")
     
     mode = input(f"Choose a mode: ({YELLOW}1{RESET} = Encrypt, {YELLOW}2{RESET} = Decrypt): ")
     key = input(f"{GREY}Enter key (or leave blank): {RESET}")

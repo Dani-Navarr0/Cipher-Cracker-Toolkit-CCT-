@@ -4,12 +4,11 @@ import datetime
 import os
 
 # ANSI color codes for terminal output
-RED = '\033[38;5;88m'
-YELLOW = '\033[38;5;3m'
-GREY = '\033[38;5;238m'
-RESET = '\033[0m'
-GREEN = '\033[38;5;2m'
-BLUE = '\033[38;5;4m'
+import sys as _sys
+_SCRIPTS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts")
+if _SCRIPTS not in _sys.path:
+    _sys.path.append(_SCRIPTS)
+from theme import RED, GREEN, YELLOW, BLUE, GREY, RESET  # noqa: E402
 
 def calculate_ioc(text: str) -> float:
     """

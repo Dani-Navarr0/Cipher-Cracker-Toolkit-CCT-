@@ -1,6 +1,6 @@
 import math
 
-RED, YELLOW, GREY, RESET, GREEN = '\033[38;5;88m', '\033[38;5;3m', '\033[38;5;238m', '\033[0m', '\033[38;5;2m'
+from theme import RED, GREEN, YELLOW, BLUE, CYAN, GREY, WHITE, RESET, banner
 
 def build_polybius_square(key=""):
     alphabet = "ABCDEFGHIKLMNOPQRSTUVWXYZ" # I and J combined
@@ -10,9 +10,7 @@ def build_polybius_square(key=""):
     return {square_chars[i]: f"{(i//5)+1}{(i%5)+1}" for i in range(25)}
 
 def run():
-    print(f"{GREEN}===================================={RESET}")
-    print(f"{GREEN}====   Polybius Square Cipher   ===={RESET}")
-    print(f"{GREEN}===================================={RESET}")
+    banner("Polybius Square", "Letters to grid coordinates and back")
     
     mode = input(f"Choose a mode:\n({YELLOW}1{RESET}) Encrypt\n({YELLOW}2{RESET}) Decrypt\n{GREY}Selection: {RESET}")
     key = input(f"{GREY}Enter optional key (leave blank for standard alphabet): {RESET}").upper()

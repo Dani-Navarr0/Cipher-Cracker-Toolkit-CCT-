@@ -6,6 +6,9 @@ import os
 import random
 import math
 from utils.utils import get_input_ciphertexts
+import attack_support
+from annealing import Schedule
+from periodic_solver import solve_periodic
 from ngram_scoring import DEFAULT_NGRAM_PATH, load_ngram_scores, score_text
 
 # --- KASISKI IMPORT ---
@@ -55,13 +58,7 @@ class DummyUtils:
 utils = DummyUtils()
 
 # --- COLOR CODES AND PATHS ---
-RESET = '\033[0m'
-GREEN = '\033[32m'
-YELLOW = '\033[33m'
-RED = '\033[31m'
-BLUE = '\033[34m'
-CYAN = '\033[36m'
-GREY = '\033[90m'
+from theme import RED, GREEN, YELLOW, BLUE, CYAN, GREY, WHITE, RESET, banner
 
 data_dir = os.path.join(os.path.dirname(__file__), "data")
 dictionary_path = os.path.join(data_dir, "words_alpha.txt")
@@ -107,26 +104,8 @@ def decrypt_beaufort(ciphertext: str, key: str, alphabet_str: str) -> str:
             plaintext.append(char.lower())
     return ''.join(plaintext)
 
-def load_dictionary(file_path: str, alphabet_str: str, min_length: int = 3, max_length: int = 15, allowed_lengths: List[int] = None) -> List[str]:
-    alphabet, _ = get_alphabet(alphabet_str)
-    alphabet_set = set(alphabet)
-    try:
-        with open(file_path, 'r', encoding='utf-8') as file:
-            if allowed_lengths:
-                return [word.strip().upper() for word in file
-                        if set(word.strip().upper()).issubset(alphabet_set)
-                        and len(word.strip()) in allowed_lengths]
-            else:
-                return [word.strip().upper() for word in file
-                        if set(word.strip().upper()).issubset(alphabet_set)
-                        and min_length <= len(word.strip()) <= max_length]
-    except FileNotFoundError:
-        print(f"{RED}Error: {file_path} not found{RESET}")
-        return []
-
-def contains_all_phrases(text: str, phrases: List[str]) -> bool:
-    if not phrases: return False
-    return all(phrase.upper() in text.upper().replace(" ", "") for phrase in phrases)
+load_dictionary = attack_support.load_dictionary
+contains_all_phrases = attack_support.contains_all_phrases
 
 def highlight_phrases(text: str, phrases: List[str]) -> str:
     highlighted_text = text.lower()
@@ -139,23 +118,9 @@ def highlight_phrases(text: str, phrases: List[str]) -> str:
 # --- ATTACK FUNCTIONS ---
 def process_batch(args: Tuple) -> List[Dict]:
     word_batch, ciphertext, target_phrases, alphabet_str, expected_freqs, min_ioc, max_ioc = args
-    results = []
-    
-    for word in word_batch:
-        plaintext = decrypt_beaufort(ciphertext, word, alphabet_str)
-        is_phrase_match = contains_all_phrases(plaintext, target_phrases)
-        
-        ioc = utils.calculate_ioc(plaintext)
-        
-        if is_phrase_match or (min_ioc <= ioc <= max_ioc):
-            bigram_score = calculate_bigram_score(plaintext, expected_freqs)
-            results.append({
-                'key': word, 'plaintext': plaintext, 'ioc': ioc, 'bigram_score': bigram_score,
-                'is_phrase_match': is_phrase_match,
-                'matched_phrases': target_phrases if is_phrase_match else []
-            })
-            
-    return results
+    return attack_support.score_batch(
+        (decrypt_beaufort, word_batch, ciphertext, alphabet_str, target_phrases, expected_freqs, min_ioc, max_ioc)
+    )
 
 def batch_words(words: List[str], batch_size: int = 500) -> List[List[str]]:
     return [words[i:i + batch_size] for i in range(0, len(words), batch_size)]
@@ -181,44 +146,20 @@ def run_dictionary_attack(ciphertext: str, alphabet_str: str, expected_freqs: Di
     if specific_keys:
         print(f"\n{YELLOW}Checking specific keys...{RESET}")
         for key in specific_keys:
-            plaintext = decrypt_beaufort(ciphertext, key, alphabet_str)
-            is_phrase_match = contains_all_phrases(plaintext, target_phrases)
-            ioc = utils.calculate_ioc(plaintext)
-            if is_phrase_match or (min_ioc <= ioc <= max_ioc):
-                bigram_score = calculate_bigram_score(plaintext, expected_freqs)
-                all_results.append({
-                    'key': key, 'plaintext': plaintext, 'ioc': ioc, 'bigram_score': bigram_score,
-                    'is_phrase_match': is_phrase_match, 'matched_phrases': target_phrases if is_phrase_match else []
-                })
-                if is_phrase_match: print(f"Phrase match found with specific key: {RED}{key}{RESET}")
-            
+            # Keys the user typed explicitly are always reported.
+            result = attack_support.make_result(key, decrypt_beaufort(ciphertext, key, alphabet_str), expected_freqs, target_phrases)
+            all_results.append(result)
+            if result['is_phrase_match']: print(f"Phrase match found with specific key: {RED}{key}{RESET}")
+
     print(f"{YELLOW}Loading dictionary for alphabet {alphabet_str[:10]}...{RESET}")
     dictionary = load_dictionary(dictionary_path, alphabet_str, allowed_lengths=allowed_lengths)
-    
+
     if dictionary:
-        word_batches = batch_words(dictionary)
-        num_processes = max(1, os.cpu_count() - 1)
-        total_batches = len(word_batches)
-        
-        print(f"Processing {YELLOW}{len(dictionary):,}{RESET} words with {YELLOW}{num_processes}{RESET} processes...")
-        start_time = time.time()
-        
-        with ProcessPoolExecutor(max_workers=num_processes) as executor:
-            futures = [executor.submit(process_batch, (b, ciphertext, target_phrases, alphabet_str, expected_freqs, min_ioc, max_ioc)) for b in word_batches]
-            for i, future in enumerate(as_completed(futures)):
-                all_results.extend(future.result())
-                if total_batches > 10:
-                    print(f"Progress: {(i + 1) / total_batches:.1%}", end='\r')
-        print(f"\nDictionary search complete in {time.time() - start_time:.2f} seconds.{RESET}")
-    
-    filtered_results = all_results 
-    
-    filtered_results.sort(key=lambda x: (
-        0 if x['is_phrase_match'] else 1, 
-        0 if min_ioc <= x['ioc'] <= max_ioc else 1,
-        x['bigram_score'], 
-        -x['ioc']
-    ))
+        all_results.extend(attack_support.run_batches(
+            decrypt_beaufort, dictionary, ciphertext, alphabet_str, target_phrases, expected_freqs, min_ioc, max_ioc
+        ))
+
+    filtered_results = attack_support.sort_results(all_results)
 
     if filtered_results:
         print(f"\n{YELLOW}--- TOP 5 MATCHES ---{RESET}")
@@ -242,46 +183,37 @@ def generate_neighbor_key(key: str, alphabet: str) -> str:
     return "".join(key_list)
 
 def run_simulated_annealing_attack(ciphertext: str, alphabet_str: str, expected_freqs: Dict, config: Dict):
+    """Anneal the key with the shared engine (geometric 20 -> 0.1 schedule).
+
+    The previous loop started at temperature 1000 with linear cooling, which
+    accepts nearly every move until the last ~2% of iterations.
+    """
     key_length = config.get('key_length', 5)
     iterations = config.get('iterations', 200000)
-    initial_temp = 1000.0
+    restarts = config.get('restarts', 3)
 
-    print(f"\n{BLUE}--- Simulated Annealing (Key Len: {key_length}) ---{RESET}")
+    print(f"\n{BLUE}--- Simulated Annealing (Key Len: {key_length}, {restarts} restarts x {iterations:,} steps) ---{RESET}")
     alphabet, _ = get_alphabet(alphabet_str)
-    
-    current_key = "".join(random.choice(alphabet) for _ in range(key_length))
-    plaintext = decrypt_beaufort(ciphertext, current_key, alphabet_str)
-    current_score = calculate_bigram_score(plaintext, expected_freqs)
+    results = solve_periodic(
+        ciphertext, alphabet, alphabet, key_length,
+        lambda c, k, m: (k - c) % m,            # Beaufort: P = K - C
+        expected_freqs, Schedule(iterations), restarts=restarts,
+    )
+    if results is None:
+        print(f"{RED}Annealing needs an alphabet that is a permutation of A-Z.{RESET}")
+        return []
 
-    best_key, best_score = current_key, current_score
-    
-    try:
-        for i in range(iterations):
-            temp = initial_temp * (1.0 - (i + 1) / iterations)
-            if temp <= 0: break
-
-            neighbor_key = generate_neighbor_key(current_key, alphabet)
-            plaintext = decrypt_beaufort(ciphertext, neighbor_key, alphabet_str)
-            neighbor_score = calculate_bigram_score(plaintext, expected_freqs)
-            
-            delta = neighbor_score - current_score
-            if delta < 0 or random.random() < math.exp(-delta / temp):
-                current_key, current_score = neighbor_key, neighbor_score
-                if current_score < best_score:
-                    best_key, best_score = current_key, current_score
-                    best_text = decrypt_beaufort(ciphertext, best_key, alphabet_str).upper()
-                    print(f"Score: {best_score:8.2f} | Key: {best_key} | Text: {best_text[:30]}...", end='\r')
-
-    except KeyboardInterrupt:
-        print("\nSkipping to next result...")
-    
-    print("\n" + "="*60)
+    best_key = results[0][0]
     best_plaintext = decrypt_beaufort(ciphertext, best_key, alphabet_str).upper()
+    best_score = calculate_bigram_score(best_plaintext, expected_freqs)
+    print("\n" + "="*60)
     print(f"Final Best Key: {YELLOW}{best_key}{RESET}")
-    print(f"N-gram Score: {YELLOW}{best_score:.2f}{RESET}")
+    print(f"N-gram Score: {YELLOW}{best_score:.2f}{RESET} (lower is better)")
     print(f"IoC: {YELLOW}{utils.calculate_ioc(best_plaintext):.4f}{RESET}")
     print(f"Text: {best_plaintext}")
-    
+    if len(results) > 1:
+        print(f"{GREY}Restart keys: {', '.join(key for key, _, _ in results)}{RESET}")
+
     return [{'key': best_key, 'plaintext': best_plaintext, 'bigram_score': best_score}]
 
 def run_direct_decrypt(ciphertext: str, alphabet_str: str, config: Dict):
@@ -298,9 +230,7 @@ def run_direct_decrypt(ciphertext: str, alphabet_str: str, config: Dict):
 
 # --- MAIN APPLICATION ---
 def run():
-    print(f"{GREY}================================{RESET}")
-    print(f"{RED}BEAUFORT SOLVER{RESET}")
-    print(f"{GREY}================================{RESET}")
+    banner("Beaufort Cipher", "P = K - C: dictionary, annealing and direct decryption")
     
     ciphertexts = get_input_ciphertexts(prompt="Enter ciphertext")
     if not ciphertexts:

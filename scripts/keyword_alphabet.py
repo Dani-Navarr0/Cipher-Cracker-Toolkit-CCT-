@@ -1,12 +1,7 @@
 import os
 
 # ANSI color codes for terminal output
-RED = '\033[38;5;88m'
-YELLOW = '\033[38;5;3m'
-GREY = '\033[38;5;238m'
-RESET = '\033[0m'
-GREEN = '\033[38;5;2m'
-CYAN = '\033[36m'
+from theme import RED, GREEN, YELLOW, BLUE, CYAN, GREY, WHITE, RESET, banner
 
 DEFAULT_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 
@@ -32,9 +27,7 @@ def generate_keyword_alphabet(keyword: str, base_alphabet: str = DEFAULT_ALPHABE
     return "".join(custom_alphabet)
 
 def run():
-    print(f"{GREEN}===================================={RESET}")
-    print(f"{GREEN}==== Keyword Alphabet Generator ===={RESET}")
-    print(f"{GREEN}===================================={RESET}")
+    banner("Keyword Alphabet Generator", "Build mixed alphabets from a keyword")
     
     while True:
         keywords_input = input(f"\n{GREY}Enter keyword(s) separated by commas (or 'Q' to quit): {RESET}").strip()
