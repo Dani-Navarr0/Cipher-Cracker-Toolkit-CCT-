@@ -104,7 +104,7 @@ The annealing solvers maximise mean n-gram log score × letter-entropy^0.5 (Grom
 
 1. Clone the repository to your local machine:
    ```bash
-   git clone [https://github.com/hippie-cycling/CBFT.git](https://github.com/hippie-cycling/CBFT.git)
+   git clone [https://github.com/Dani-Navarr0/Cipher-Cracker-Toolkit-CCT-.git](https://github.com/Dani-Navarr0/Cipher-Cracker-Toolkit-CCT-.git)
    ```
 2. Run the launcher from the repository root (Python 3.10 or newer; standard library only, no `pip install` needed):
    ```bash
