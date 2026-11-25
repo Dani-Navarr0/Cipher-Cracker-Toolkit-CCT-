@@ -64,6 +64,7 @@ CATEGORIES = [
         (35, "Kasiski Examination", "kasiski", "Repeated sequences point to likely key lengths"),
         (36, "Friedman Test", "friedman_test", "Estimate a polyalphabetic key length from the IoC"),
         (37, "Two-Layer Solver", "two_layer", "Two stacked layers (sub / trans / Vigenere) solved jointly"),
+        (38, "Known-Plaintext Columnar", "crib_columnar_search", "Every column order + periodic key fitting known letters (C/GPU)"),
     ]),
     ("Utilities", [
         (40, "Index of Coincidence", "ioc", "Monoalphabetic or polyalphabetic? English ~0.066"),
@@ -71,6 +72,7 @@ CATEGORIES = [
         (42, "Matrix Generator", "Matrix Generator", "Write a string into every n x m grid"),
         (43, "Text Formatter", "text_formatter", "Clean and reshape ciphertext"),
         (44, "Keyword Alphabet", "keyword_alphabet", "Build mixed alphabets from a keyword"),
+        (45, "Native Engines", "native_tools", "Build the C engines; list, tune and enable GPUs (OpenCL)"),
     ]),
     ("System", [
         ("H", "Help", "help", "How to use the toolkit, tool by tool"),
@@ -368,7 +370,13 @@ def show_help():
   2. {YELLOW}41{RESET} Frequency Analysis: English-like frequencies point to transposition.
   3. {YELLOW}35{RESET}/{YELLOW}36{RESET} Kasiski / Friedman estimate a polyalphabetic key length.
   4. Solve: {YELLOW}31{RESET} substitution, {YELLOW}32{RESET}/{YELLOW}23{RESET} transposition, {YELLOW}30{RESET}/{YELLOW}1{RESET} Vigenere,
-     or {YELLOW}37{RESET} when two layers were stacked.
+     or {YELLOW}37{RESET} when two layers were stacked. With known plaintext at known
+     positions, {YELLOW}38{RESET} tests every column order + periodic key exhaustively.
+
+{BOLD}Speed{RESET}
+  {YELLOW}45{RESET} Native Engines builds the C engines (python -m pip install ziglang first)
+  and enables a GPU. The transposition brute force and annealers (23, 32) and
+  tool 38 then run in C or on the GPU, with the same results as the Python code.
 
 {BOLD}Scoring{RESET}
   Solvers rank candidate plaintexts with English n-gram statistics (5-grams by

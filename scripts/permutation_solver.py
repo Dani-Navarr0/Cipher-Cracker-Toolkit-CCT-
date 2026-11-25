@@ -267,7 +267,18 @@ def run_simulated_annealing_pass(
     temp = starting_temp
     iteration = 0
     start_time = time.time()
-    
+
+    native_result = None
+    try:
+        native_result = _native_anneal(ciphertext, width, mode, ngram_model, ent_weight, current_perm, starting_temp,
+                                       cooling_rate, steps_per_temp, moves=1)
+    except KeyboardInterrupt:
+        print("\nPass manually interrupted.")
+        native_result = (best_perm, best_score)
+    if native_result is not None:
+        best_perm, best_score = native_result
+        temp = 0.0      # the native loop ran the whole schedule
+
     try:
         while temp > 0.1:
             for _ in range(steps_per_temp):
@@ -305,6 +316,38 @@ def run_simulated_annealing_pass(
     return best_perm, best_score, best_text
 
 
+def _native_best_order(ciphertext, width, mode, ngram_model, ent_weight):
+    """Native brute force when it reproduces the loop exactly: the fitness ranks orders
+    by n-gram total only while the entropy factor is positive (it is constant for a
+    transposition). Returns None to use the Python loop."""
+    try:
+        from native import perm
+    except ImportError:
+        return None
+    codes = text_to_codes(ciphertext)
+    if len(codes) - ngram_model.size + 1 <= 0 or letter_entropy(codes) ** ent_weight <= 0:
+        return None
+    return perm.best_order(ciphertext, width, mode, ngram_model)
+
+
+def _native_anneal(ciphertext, width, mode, ngram_model, ent_weight, start_perm, starting_temp, cooling_rate,
+                   steps_per_temp, moves):
+    """Native annealing (same moves, schedule and acceptance rule), or None."""
+    try:
+        from native import perm
+    except ImportError:
+        return None
+    codes = text_to_codes(ciphertext)
+    if len(codes) - ngram_model.size + 1 <= 0:
+        return None
+
+    def progress(best, score, temp):
+        sample_text = decrypt_permutation(ciphertext, width, best, mode).replace('\n', ' ')[:35]
+        print(f"Temp: {temp:>5.2f} | Best Score: {GREEN}{score:>8.2f}{RESET} | Text: {sample_text}...", end='\r')
+    return perm.anneal(ciphertext, width, mode, ngram_model, letter_entropy(codes) ** ent_weight, start_perm,
+                       starting_temp, cooling_rate, steps_per_temp, moves, progress)
+
+
 def run_brute_force_for_width(
     ciphertext: str,
     width: int,
@@ -322,11 +365,16 @@ def run_brute_force_for_width(
     
     start_time = time.time()
     fitness = make_fitness(ciphertext, width, mode, ngram_model, ent_weight)
-    for p in all_perms:
-        score = fitness(p)
-        if score > best_score:
-            best_score = score
-            best_perm = list(p)
+    native_order = _native_best_order(ciphertext, width, mode, ngram_model, ent_weight)
+    if native_order is not None:
+        # C (or GPU) search: the same order the loop below keeps (first order with the best score)
+        best_perm, best_score = native_order, fitness(native_order)
+    else:
+        for p in all_perms:
+            score = fitness(p)
+            if score > best_score:
+                best_score = score
+                best_perm = list(p)
     best_text = decrypt_permutation(ciphertext, width, best_perm, mode)
 
     time_taken = time.time() - start_time

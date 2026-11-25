@@ -4,3 +4,6 @@ __pycache__/
 
 # Parsed n-gram tables (rebuilt automatically from N-grams/*.txt)
 N-grams/.cache/
+
+# Native engines are built per machine (python scripts/native_tools.py build)
+scripts/native/build/

@@ -48,6 +48,7 @@ The core strength of the CCT lies in its algorithmic approaches to cracking ciph
 * **Friedman Test:** Mathematically estimates polyalphabetic key lengths using the Index of Coincidence (IoC).
 * **Matrix Permutation Solver:** Generates and solves matrix-based permutations.
 * **Two-Layer Solver:** Attacks ciphers made of two stacked layers (substitution, columnar transposition, Vigenère/Beaufort) with one joint annealing search. See below.
+* **Known-Plaintext Columnar Search:** Given known plaintext letters at known positions, tests every column order of a columnar transposition with a periodic Vigenère/Beaufort key, exhaustively, in C or on a GPU. See below.
 
 ### N-Gram Scoring
 Scoring tools load their English n-gram scores from the `N-grams` folder. The default is the included `5-grams_english_practicalcryptography_wortschatz.txt` model; configurable solvers also let you select sizes 2 through 6, using the corresponding English datasets in that folder. Higher source-file scores indicate more likely n-grams, and the TUI reports a lower-is-better scoring cost.
@@ -60,6 +61,41 @@ The substitution simulated-annealing solver can restore word spacing using the s
 * **Keyword Alphabet Generator:** Generates mixed keyed alphabets.
 * **Text Formatter:** Cleans and formats ciphertexts.
 * **Matrix Generator:** Dumps all possible `n x m` permutations of a ciphertext string.
+* **Native Engines (menu 45):** Builds the optional C engines and lists, tunes and enables GPUs. See below.
+
+### Known-Plaintext Columnar Search (menu option 38)
+
+For a ciphertext with some plaintext letters known at known positions (for example `ATTACK@12, DAWN@60`, 1-indexed), the tool tests every column order of every width you choose, in the four layouts, with a periodic key of every length you choose, in both layer orders (key then transposition, and transposition then key). Each known letter implies one key value; letters that fall on the same key slot must agree. A wrong hypothesis passes each agreement with probability 1/26, so the tool keeps hypotheses with at least as many agreements as needed for about one chance hit overall, and prints them with their partial decryption (`?` where the key slot holds no known letter). It tries Vigenère and Beaufort (Variant Beaufort passes the same checks as Vigenère) on the straight alphabet, and optionally on a keyed alphabet in every plaintext/ciphertext pairing.
+
+This is an exact test, not a heuristic: a column order and key length that are not reported are inconsistent with the known letters (or have fewer agreements than the threshold).
+
+### Native engines (C) and GPU (OpenCL)
+
+The column-order searches have optional native engines. Every native engine has a pure-Python reference in the toolkit, and the tests require identical results; without the native library, or with the environment variable `CCT_NATIVE=0`, the Python code runs as before.
+
+```bash
+python -m pip install ziglang             # zig's C compiler as a pip package (no Visual Studio or gcc needed)
+python scripts/native_tools.py build      # or menu 45 -> 1; the library goes to scripts/native/build/ (not committed)
+python scripts/native_tools.py gpu        # or menu 45 -> 2: list GPUs, tune them, enable GPU search
+```
+
+| Tool | What runs natively | How it is checked |
+|---|---|---|
+| 23 Matrix Permutation Solver, brute force | Every column order, scored with the selected n-gram model; returns the same (first best) order as the Python loop | Same best order as the loop for n-gram sizes 3-4, widths 2-7, all layouts, English and random texts |
+| 23 Matrix Permutation Solver and 32 Annealing: Transposition, annealing | The annealing loop: same moves, cooling schedule, acceptance rule and progress display, with the C engine's own random number generator (seeded from Python's `random`) | The reported score equals the Python fitness of the returned order; planted transpositions reach at least the true key's score |
+| 38 Known-Plaintext Columnar Search | Every column order + periodic key | Identical hit lists from the Python, C and GPU engines (texts of 60, 97 and 300 letters, two alphabets, prefixed searches); a planted solution is found |
+
+GPU search uses OpenCL, which ships with the graphics driver (NVIDIA, AMD, Intel), so nothing else is installed. Results are identical to the CPU: GPU hits are sorted back into CPU order, and a launch whose hits overflow the GPU buffer is redone on the CPU. The fastest number of column orders per GPU work-item differs between GPUs; `native_tools.py gpu` measures it once per device and caches it. The GPU is used when enabled and the search is at least 9 columns wide; narrower searches are faster on the CPU. `CCT_GPU=1` enables it from the environment and `CCT_GPU_DEVICE=<text>` picks a GPU by name.
+
+Measured on a laptop (Intel i7-1280P, NVIDIA T550 Laptop GPU, Intel UHD Graphics; one process; laptop timings vary with temperature):
+
+| Search | Python | C | GPU |
+|---|---|---|---|
+| Brute force, width 8, 250 letters, 5-grams | 47,000 orders/s | 417,000 orders/s | - |
+| Brute force, width 10, 250 letters, 5-grams | - | 378,000 orders/s | T550 455,000 orders/s, Intel UHD 1.5 million orders/s |
+| Known plaintext, width 8, 97 letters, 24 key lengths, 16 alphabet/variant pairings | 11.6 s | 0.14 s | - |
+
+The GPU's advantage on the n-gram brute force is small on these laptop GPUs; a desktop GPU has not been measured.
 
 ### Two-Layer Solver (menu option 37)
 
@@ -113,6 +149,8 @@ The annealing solvers maximise mean n-gram log score × letter-entropy^0.5 (Grom
 
 In the launcher, use the arrow keys (or W/S) to move, Left/Right to switch column, type a tool's number to jump to it (for example `37`), and press Enter to open it; `H` shows help and `Q` quits. Ctrl+C inside a tool returns to the menu. Colours are defined once in `scripts/theme.py`; set the `NO_COLOR` environment variable to turn them off.
 
+Optional, for speed: build the native C engines and enable a GPU (see "Native engines (C) and GPU (OpenCL)" above). This is the only part that installs anything (`python -m pip install ziglang`); the toolkit works without it.
+
 The first time a solver loads the text-format 5-gram model it parses it (a few seconds) and caches a binary copy in `N-grams/.cache/`; later loads take well under a second. Delete that folder at any time to force a re-parse.
 
 ## Running the tests
@@ -120,3 +158,5 @@ The first time a solver loads the text-format 5-gram model it parses it (a few s
 ```bash
 python -m unittest discover -s tests -t .
 ```
+
+`tests/test_native.py` compares the native and GPU engines with the Python code; its tests are skipped when the native library is not built or no OpenCL GPU is present.

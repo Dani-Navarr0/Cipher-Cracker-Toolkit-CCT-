@@ -270,6 +270,28 @@ def run_simulated_annealing_pass(
     rand = random.random
     exp = math.exp
 
+    # Native engine (C): the same moves, schedule and acceptance rule, with its own
+    # random number generator seeded from `random`; the Python loop below is the fallback.
+    if ngram_count > 0:
+        try:
+            from native import perm
+        except ImportError:
+            perm = None
+        if perm is not None:
+            def progress(best, score, level_temp):
+                sample_text = decrypt_transposition(ciphertext, best, mode).replace('\n', ' ')[:35]
+                print(f"Temp: {level_temp:>5.2f} | Best Score: {GREEN}{score:>8.2f}{RESET} | Text: {sample_text}...",
+                      end='\r')
+            try:
+                result = perm.anneal(ciphertext, key_length, mode, ngram_model, entropy_factor, current_key,
+                                     starting_temp, cooling_rate, steps_per_temp, 0, progress)
+            except KeyboardInterrupt:
+                print("\nPass manually interrupted.")
+                result = (best_key, best_score)
+            if result is not None:
+                best_key, best_score = result
+                temp = 0.0      # the native loop ran the whole schedule
+
     try:
         while temp > 0.1:
             for _ in range(steps_per_temp):
