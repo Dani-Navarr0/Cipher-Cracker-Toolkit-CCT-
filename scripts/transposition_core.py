@@ -103,7 +103,7 @@ def parse_column_key(text: str):
 
     * Numbers separated by spaces or commas, optionally in brackets, e.g.
       "[4, 2, 1, 3, 5, 0]": a READ ORDER (the column read first, then the
-      next...), as tools 23, 32, 37 and 38 print it. 1-based orders
+      next...), as tools 44, 61 and 62 print it. 1-based orders
       (1..w) are accepted too.
     * Anything else, e.g. "ZEBRAS" or "521304": a keyword; columns are read
       in alphabetical (or digit) order of its characters, ties left to right.

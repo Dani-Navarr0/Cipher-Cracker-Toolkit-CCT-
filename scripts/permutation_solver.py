@@ -1,3 +1,7 @@
+"""Tool 44, Column-Order Solver (tools 23 and 32 before menu v2.1): keyless
+column-order search, brute force and annealing, 4 layouts. Annealing moves:
+swap or reverse (old tool 23) or swap only (old tool 32). Both searches run in C
+(native/perm.py: cct_perm_bruteforce, cct_perm_anneal)."""
 import random
 import math
 import time
@@ -5,8 +9,8 @@ import re
 from pathlib import Path
 from collections import Counter
 from typing import Tuple, List, Dict
-from itertools import permutations
 
+from annealing import Fitness
 from ngram_scoring import (
     DEFAULT_NGRAM_PATH,
     NGRAM_DIRECTORY,
@@ -15,19 +19,16 @@ from ngram_scoring import (
     available_spacing_models,
     load_spacing_model,
     load_ngram_scores,
-    ngram_total,
     resolve_ngram_path,
     text_to_codes,
 )
-# Same four layouts as the SA transposition solver; its slice-based decryptor
-# is verified identical to get_decryption_indices below.
 from transposition_core import make_decryptor, letter_entropy
 
 # ANSI Colors
 from theme import RED, GREEN, YELLOW, BLUE, CYAN, GREY, WHITE, RESET, banner
 
 TRANSPOSITION_MODES = {
-    # Numbered as in tools 32 and 37 (layered.TRANSPOSITION_MODES order).
+    # Numbered as in the Two-Layer Solver, tool 61 (layered.TRANSPOSITION_MODES order).
     '1': ('write_rows_read_cols', 'Write Rows, Permute Cols, Read Columns (Standard Columnar)'),
     '2': ('write_rows_read_rows', 'Write Rows, Permute Cols, Read Rows (Matrix Transposition)'),
     '3': ('write_cols_read_rows', 'Write Columns, Permute Cols, Read Rows'),
@@ -129,122 +130,23 @@ def get_factors(n: int) -> List[int]:
     return sorted(factors)
 
 
-def get_decryption_indices(N: int, W: int, mode: str, perm: List[int]) -> List[int]:
-    """Pre-computes index mapping for matrix column permutation."""
-    H = (N + W - 1) // W
-    r = N % W
-    if r == 0: r = W
-
-    indices = [0] * N
-
-    if mode == "write_rows_read_rows":
-        row_start = {}
-        idx = 0
-        for row in range(H):
-            row_start[row] = {}
-            for k in perm:
-                if row < H - 1 or k < r:
-                    row_start[row][k] = idx
-                    idx += 1
-        out_idx = 0
-        for row in range(H):
-            for col in range(W):
-                if row < H - 1 or col < r:
-                    indices[out_idx] = row_start[row][col]
-                    out_idx += 1
-
-    elif mode == "write_rows_read_cols":
-        col_start = {}
-        idx = 0
-        for k in perm:
-            col_start[k] = idx
-            idx += (H if k < r else H - 1)
-        
-        out_idx = 0
-        for row in range(H):
-            for col in range(W):
-                if row < H - 1 or col < r:
-                    indices[out_idx] = col_start[col] + row
-                    out_idx += 1
-
-    elif mode == "write_cols_read_rows":
-        row_start = {}
-        idx = 0
-        for row in range(H):
-            row_start[row] = {}
-            for k in perm:
-                if row < H - 1 or k < r:
-                    row_start[row][k] = idx
-                    idx += 1
-        out_idx = 0
-        for col in range(W):
-            col_len = H if col < r else H - 1
-            for row in range(col_len):
-                indices[out_idx] = row_start[row][col]
-                out_idx += 1
-
-    elif mode == "write_cols_read_cols":
-        col_start = {}
-        idx = 0
-        for k in perm:
-            col_start[k] = idx
-            idx += (H if k < r else H - 1)
-        
-        out_idx = 0
-        for col in range(W):
-            col_len = H if col < r else H - 1
-            for row in range(col_len):
-                indices[out_idx] = col_start[col] + row
-                out_idx += 1
-
-    return indices
-
-
 def decrypt_permutation(ciphertext: str, width: int, perm: List[int], mode: str) -> str:
     return make_decryptor(ciphertext, width, mode)(perm).decode("latin-1")
 
 
-def make_fitness(ciphertext: str, width: int, mode: str, ngram_model, ent_weight: float):
-    """Return ``fitness(perm)`` equal to calculate_fitness(decrypt_permutation(...)).
-
-    A permutation only reorders letters, so the entropy factor is computed
-    once; each call is one C-level decrypt plus the rolling n-gram sum.
-    """
-    codes = text_to_codes(ciphertext)
-    ngram_size, scores = ngram_model.size, ngram_model.scores
-    ngram_count = len(codes) - ngram_size + 1
-    if ngram_count <= 0:
-        return lambda perm: -9999.0
-    entropy_factor = letter_entropy(codes) ** ent_weight
-    decrypt_codes = make_decryptor(codes, width, mode)
-    return lambda perm: (ngram_total(decrypt_codes(perm), scores, ngram_size) / ngram_count) * entropy_factor
+def plaintext_fitness(text: str, ngram_model, ent_weight: float) -> float:
+    """annealing.Fitness of a plaintext (the value cipher_profile.fitness_function() gives)."""
+    return Fitness(ngram_model, ent_weight)(text_to_codes(text))
 
 
-def calculate_fitness(text: str, ngram_model, ent_weight: float) -> float:
-    scores = ngram_model.scores
-    ngram_size = ngram_model.size
-    letters = text_to_codes(text)
-    al = len(letters) - ngram_size + 1
-
-    if al <= 0:
-        return -9999.0
-
-    return (ngram_total(letters, scores, ngram_size) / al) * (letter_entropy(letters) ** ent_weight)
-
-
-def modify_perm(perm: List[int]) -> List[int]:
-    """Mutates permutation array via element swap or sub-segment inversion."""
-    new_perm = list(perm)
-    if len(perm) < 2:
-        return new_perm
-        
-    if random.random() < 0.7:
-        idx1, idx2 = random.sample(range(len(perm)), 2)
-        new_perm[idx1], new_perm[idx2] = new_perm[idx2], new_perm[idx1]
-    else:
-        idx1, idx2 = sorted(random.sample(range(len(perm)), 2))
-        new_perm[idx1:idx2] = reversed(new_perm[idx1:idx2])
-    return new_perm
+def seconds_per_step(ciphertext: str, width: int, mode: str, ngram_model, steps: int = 50_000) -> float:
+    """Measured time of one C annealing step (one column-order evaluation)."""
+    from native import perm
+    start = list(range(width))
+    started = time.perf_counter()
+    # one temperature level: 0.2 -> 0.1 with cooling 0.5
+    perm.anneal(ciphertext, width, mode, ngram_model, 1.0, start, 0.2, 0.5, steps, 1)
+    return (time.perf_counter() - started) / steps
 
 
 def run_simulated_annealing_pass(
@@ -255,98 +157,42 @@ def run_simulated_annealing_pass(
     starting_temp: float,
     cooling_rate: float,
     steps_per_temp: int,
-    ent_weight: float
+    ent_weight: float,
+    moves: int = 1
 ) -> Tuple[List[int], float, str]:
-    current_perm = list(range(width))
-    random.shuffle(current_perm)
-    fitness = make_fitness(ciphertext, width, mode, ngram_model, ent_weight)
-    current_score = fitness(current_perm)
-    
-    best_perm = current_perm
-    best_score = current_score
-    
-    temp = starting_temp
-    iteration = 0
-    start_time = time.time()
-
-    native_result = None
-    try:
-        native_result = _native_anneal(ciphertext, width, mode, ngram_model, ent_weight, current_perm, starting_temp,
-                                       cooling_rate, steps_per_temp, moves=1)
-    except KeyboardInterrupt:
-        print("\nPass manually interrupted.")
-        native_result = (best_perm, best_score)
-    if native_result is not None:
-        best_perm, best_score = native_result
-        temp = 0.0      # the native loop ran the whole schedule
-
-    try:
-        while temp > 0.1:
-            for _ in range(steps_per_temp):
-                new_perm = modify_perm(current_perm)
-                new_score = fitness(new_perm)
-                
-                score_diff = new_score - current_score
-                
-                if score_diff > 0:
-                    current_perm = new_perm
-                    current_score = new_score
-                    
-                    if new_score > best_score:
-                        best_score = new_score
-                        best_perm = new_perm
-                        
-                elif temp > 0:
-                    probability = math.exp(score_diff / temp)
-                    if random.random() < probability:
-                        current_perm = new_perm
-                        current_score = new_score
-            
-            temp *= cooling_rate
-            iteration += 1
-            
-            if iteration % 10 == 0:
-                sample_text = decrypt_permutation(ciphertext, width, best_perm, mode).replace('\n', ' ')[:35]
-                print(f"Temp: {temp:>5.2f} | Best Score: {GREEN}{best_score:>8.2f}{RESET} | Text: {sample_text}...", end='\r')
-    except KeyboardInterrupt:
-        print("\nPass manually interrupted.")
-
-    time_taken = time.time() - start_time
-    best_text = decrypt_permutation(ciphertext, width, best_perm, mode)
-    print(f"\n{GREEN}Pass Complete in {time_taken:.2f}s! Best Score: {best_score:.2f}{RESET}")
-    return best_perm, best_score, best_text
-
-
-def _native_best_order(ciphertext, width, mode, ngram_model, ent_weight):
-    """Native brute force when it reproduces the loop exactly: the fitness ranks orders
-    by n-gram total only while the entropy factor is positive (it is constant for a
-    transposition). Returns None to use the Python loop."""
-    try:
-        from native import perm
-    except ImportError:
-        return None
-    codes = text_to_codes(ciphertext)
-    if len(codes) - ngram_model.size + 1 <= 0 or letter_entropy(codes) ** ent_weight <= 0:
-        return None
-    return perm.best_order(ciphertext, width, mode, ngram_model)
-
-
-def _native_anneal(ciphertext, width, mode, ngram_model, ent_weight, start_perm, starting_temp, cooling_rate,
-                   steps_per_temp, moves):
-    """Native annealing (same moves, schedule and acceptance rule), or None."""
-    try:
-        from native import perm
-    except ImportError:
-        return None
+    """One annealing pass in C. moves 1: 70% swap two columns, 30% reverse a
+    slice; moves 0: swap only (old tool 32, before menu v2.1). Both cool
+    from starting_temp by cooling_rate per level until 0.1. Ctrl+C ends
+    the pass early and keeps the best order reported so far. The score returned
+    is the fitness of the plaintext found."""
+    import native
+    from native import perm
+    native.require()
+    start = list(range(width))
+    random.shuffle(start)
     codes = text_to_codes(ciphertext)
     if len(codes) - ngram_model.size + 1 <= 0:
-        return None
+        raise ValueError(f"The text is shorter than the {ngram_model.size}-gram model.")
+    started = time.time()
+    latest = [start]
 
     def progress(best, score, temp):
+        latest[0] = best
         sample_text = decrypt_permutation(ciphertext, width, best, mode).replace('\n', ' ')[:35]
         print(f"Temp: {temp:>5.2f} | Best Score: {GREEN}{score:>8.2f}{RESET} | Text: {sample_text}...", end='\r')
-    return perm.anneal(ciphertext, width, mode, ngram_model, letter_entropy(codes) ** ent_weight, start_perm,
-                       starting_temp, cooling_rate, steps_per_temp, moves, progress)
+    try:
+        result = perm.anneal(ciphertext, width, mode, ngram_model, letter_entropy(codes) ** ent_weight,
+                             start, starting_temp, cooling_rate, steps_per_temp, moves, progress)
+        if result is None:
+            raise ValueError(f"Width {width} is outside the C engine's range (2-{native.MAXW}, and at most the text length).")
+        best_perm = result[0]
+    except KeyboardInterrupt:
+        print("\nPass manually interrupted; keeping the best order so far.")
+        best_perm = latest[0]
+    best_text = decrypt_permutation(ciphertext, width, best_perm, mode)
+    best_score = plaintext_fitness(best_text, ngram_model, ent_weight)
+    print(f"\n{GREEN}Pass Complete in {time.time() - started:.2f}s! Best Score: {best_score:.2f}{RESET}")
+    return list(best_perm), best_score, best_text
 
 
 def run_brute_force_for_width(
@@ -356,30 +202,19 @@ def run_brute_force_for_width(
     ngram_model,
     ent_weight: float
 ) -> Tuple[List[int], float, str]:
+    """Every column order of ``width`` in C (or on the GPU when enabled); returns
+    the first order with the best score."""
+    import native
+    from native import perm
+    native.require()
     print(f"{GREY}Running Brute Force for Width {width} ({math.factorial(width):,} permutations)...{RESET}")
-    cols = list(range(width))
-    all_perms = permutations(cols)
-    
-    best_perm = list(cols)
-    best_score = float('-inf')
-    best_text = ""
-    
-    start_time = time.time()
-    fitness = make_fitness(ciphertext, width, mode, ngram_model, ent_weight)
-    native_order = _native_best_order(ciphertext, width, mode, ngram_model, ent_weight)
-    if native_order is not None:
-        # C (or GPU) search: the same order the loop below keeps (first order with the best score)
-        best_perm, best_score = native_order, fitness(native_order)
-    else:
-        for p in all_perms:
-            score = fitness(p)
-            if score > best_score:
-                best_score = score
-                best_perm = list(p)
+    started = time.time()
+    best_perm = perm.best_order(ciphertext, width, mode, ngram_model)
+    if best_perm is None:
+        raise ValueError(f"Width {width} is outside the C engine's range (2-{native.MAXW}, and at most the text length).")
     best_text = decrypt_permutation(ciphertext, width, best_perm, mode)
-
-    time_taken = time.time() - start_time
-    print(f"{GREEN}Brute Force Complete in {time_taken:.2f}s! Best Score: {best_score:.2f}{RESET}")
+    best_score = plaintext_fitness(best_text, ngram_model, ent_weight)
+    print(f"{GREEN}Brute Force Complete in {time.time() - started:.2f}s! Best Score: {best_score:.2f}{RESET}")
     return best_perm, best_score, best_text
 
 
@@ -425,7 +260,9 @@ def annealing_steps(starting_temp, cooling_rate, steps_per_temp):
 
 
 def run():
-    banner("Matrix Permutation Solver", "Keyless column-order search: brute force and annealing, 4 layouts")
+    import native
+    native.require()            # both searches run in C
+    banner("Column-Order Solver", "Keyless column-order search: brute force and annealing, 4 layouts")
 
     ciphertext_input = input(f"\n{GREY}Enter ciphertext: {RESET}").strip().upper()
     ciphertext = "".join(ch for ch in ciphertext_input if "A" <= ch <= "Z")
@@ -464,15 +301,9 @@ def run():
     print(f"{GREY}Loading N-gram model from: {YELLOW}{selected_ngram_path.name}{RESET}")
     ngram_model = load_ngram_scores(selected_ngram_path)
 
-    try:
-        import native as _native_engines
-        native = _native_engines.available()   # the C library is built and loads
-    except (ImportError, OSError):
-        native = False
-    bf_default = 9 if native else 8
-    engine = "C engine available" if native else "Python; 45 builds the C engine"
+    bf_default = 9
     bf_in = input(f"\nBrute-force every column order up to width (Enter = {YELLOW}{bf_default}{RESET}, "
-                  f"{GREY}{engine}{RESET}): ").strip()
+                  f"0 = anneal every width; {GREY}C engine{RESET}): ").strip()
     bf_limit = int(bf_in) if bf_in.isdigit() else bf_default
 
     print(f"\n{GREY}Annealing for wider keys (Enter keeps the defaults):{RESET}")
@@ -487,27 +318,23 @@ def run():
         runs = int(r_in) if r_in else 3
         ew_in = input(f"Entropy Weight (AZDecrypt default ~{YELLOW}0.5{RESET}): ")
         ent_weight = float(ew_in) if ew_in else 0.5
+        mv_in = input(f"Moves: {YELLOW}1{RESET} = swap or reverse columns (default), "
+                      f"{YELLOW}2{RESET} = swap only (old tool 32, before menu v2.1): ").strip()
+        moves = 0 if mv_in == "2" else 1
     except ValueError:
         print(f"{RED}Not a number.{RESET}")
         return
 
-    # Estimate before starting: one fitness evaluation, timed on this machine.
-    fitness = make_fitness(ciphertext, target_widths[-1], active_modes[0][0], ngram_model, ent_weight)
-    sample = list(range(target_widths[-1]))
-    started = time.perf_counter()
-    for _ in range(300):
-        random.shuffle(sample)
-        fitness(sample)
-    per_eval = (time.perf_counter() - started) / 300
+    # Estimate before starting: one C step (one column-order evaluation), timed on this machine.
+    per_eval = seconds_per_step(ciphertext, target_widths[-1], active_modes[0][0], ngram_model)
     brute = [w for w in target_widths if w <= bf_limit]
     anneal = [w for w in target_widths if w > bf_limit]
     brute_evals = sum(math.factorial(w) for w in brute) * len(active_modes)
     anneal_evals = annealing_steps(starting_temp, cooling_rate, steps_per_temp) * runs * len(anneal) * len(active_modes)
-    estimate = (0 if native else brute_evals * per_eval) + anneal_evals * per_eval
-    c_note = " (brute force runs in C and is not counted)" if native and brute else ""
+    estimate = (brute_evals + anneal_evals) * per_eval
     print(f"\n{BLUE}Plan:{RESET} brute force widths {brute or 'none'}, annealing widths {anneal or 'none'}, "
-          f"{len(active_modes)} layout(s): about {YELLOW}{estimate / 60:.1f} min{RESET} at Python speed{c_note}. "
-          f"Ctrl+C ends a pass early.")
+          f"{len(active_modes)} layout(s): about {YELLOW}{estimate / 60:.1f} min{RESET} in C "
+          f"({per_eval * 1e6:.2f} us per order measured; the GPU, when enabled, is faster). Ctrl+C ends a pass early.")
     if input("Start? ([Y]/n): ").strip().lower() == 'n':
         return
 
@@ -527,7 +354,7 @@ def run():
                 passes = [run_brute_force_for_width(ciphertext, width, mode_code, ngram_model, ent_weight)]
             else:
                 passes = [run_simulated_annealing_pass(ciphertext, width, mode_code, ngram_model, starting_temp,
-                                                       cooling_rate, steps_per_temp, ent_weight)
+                                                       cooling_rate, steps_per_temp, ent_weight, moves)
                           for _ in range(runs)]
             for perm, score, text in passes:
                 all_results.append({
@@ -543,7 +370,7 @@ def run():
     print(f"Matrix Size:   {best['width']} columns x {-(-length // best['width'])} rows")
     print(f"Layout Mode:   {CYAN}{best['mode_desc']}{RESET}")
     print(f"Read order:    {list(best['perm'])}  {GREY}(as a key: {order_to_keyword(best['perm'])}; "
-          f"tool 20's Direct decrypt accepts either){RESET}")
+          f"tool 45's Direct decrypt accepts either){RESET}")
     print(f"Fitness Score: {GREEN}{best['score']:.2f}{RESET} {GREY}(higher = more English){RESET}")
     if length >= 20:
         import cipher_profile as cp

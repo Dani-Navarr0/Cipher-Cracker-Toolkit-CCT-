@@ -25,76 +25,124 @@ import session  # noqa: E402
 
 session.install_input_hook()
 
-VERSION = "2.0"
+VERSION = "2.1"
 
 # --------------------------------------------------------------------------
-# Menu definition: (hotkey, title, module file, one-line description).
-# Tools are imported only when opened: start-up stays fast, a broken tool
-# cannot stop the menu from loading, and worker processes (which re-import
-# this file on Windows) stay light.
+# Menu definition: (number, title, module file, one-line description).
+# The grid reads in attack order: START HERE (set the ciphertext, analyze,
+# identify), then solve-by-family blocks numbered by tens, then encode/decode,
+# utilities and setup. Tools are imported only when opened: start-up stays
+# fast, a broken tool cannot stop the menu from loading, and worker processes
+# (which re-import this file on Windows) stay light.
 # --------------------------------------------------------------------------
 CATEGORIES = [
-    ("Substitution ciphers", [
-        (1, "Vigenere Cipher", "vigenere", "Decrypt, dictionary attack, or anneal a Vigenere key"),
-        (2, "Gromark Cipher", "Gromark_transposition", "Keyed alphabet + numeric primer: decrypt and search"),
-        (3, "Gronsfeld Cipher", "Gronsfeld", "Vigenere with a numeric key: exhaustive search or annealing"),
-        (4, "Autoclave Cipher", "autoclave", "Autokey: recover the primer with no word list, decrypt, encrypt"),
-        (5, "Hill Cipher", "hill", "Ciphertext-only 2x2/3x3 attack, known plaintext, decrypt, encrypt"),
-        (6, "XOR", "xor", "XOR text with a key; try keys from a word list"),
-        (7, "Modular ADD-SUB", "modular_add_sub", "Add or subtract a key modulo the alphabet"),
-        (8, "Caesar Cipher", "caesar", "Single shift: decrypt or rank every shift"),
-        (9, "Playfair Cipher", "playfair", "Digraph cipher: square annealing (no key needed), dictionary attack"),
-        (10, "Affine Cipher", "affine", "a*x + b mod m: decrypt or try every valid key"),
-        (11, "Polybius Square", "polybius", "Letters to grid coordinates and back"),
-        (12, "Bifid Cipher", "bifid", "Polybius fractionation cipher (full length, no period)"),
-        (13, "Beaufort Cipher", "beaufort", "P = K - C: decrypt, dictionary attack, annealing"),
-        (14, "Porta Cipher", "porta", "Reciprocal 13-alphabet cipher: decrypt, dictionary, annealing"),
-        (15, "Four-Square Cipher", "four_square", "Two keyed squares: decrypt or anneal"),
-        (16, "Running Key Cipher", "running_key", "Book-text key: decrypt or crib-drag"),
-        (17, "Quagmire (Keyword Alphabets)", "keyword_periodic", "Periodic key on keyword alphabets: every dictionary word, I-III"),
-        (18, "Bifid / Trifid Solver", "fractionation_solver", "Ciphertext only: anneal the square or cube, every period"),
-        (19, "Gromark Solver", "gromark_solver", "Ciphertext only: screen every primer, climb the mixed alphabet"),
+    ("Start here · identify", [
+        ("C", "Set ciphertext", "session", "Paste or load the ciphertext once; every tool then offers it"),
+        (1, "Unknown Cipher Analyzer", "cipher_analyzer", "Ranks likely cipher types, quick solves, marks the tools to try"),
+        (2, "Index of Coincidence", "ioc", "Mono or poly? English ~0.066, random letters ~0.038"),
+        (3, "Frequency Analysis", "freq_analysis", "Letter, bigram and trigram counts vs English"),
+        (4, "Kasiski Examination", "kasiski", "Distances between repeats point to a periodic key length"),
+        (5, "Friedman Test", "friedman_test", "Estimate a periodic key length from the IoC"),
     ]),
-    ("Transposition ciphers", [
-        (20, "Columnar Transposition", "columnar_transposition", "Dictionary, exhaustive and annealing attacks (single/double)"),
-        (21, "Scytale Cipher", "Scytale", "Rod transposition: try every side count"),
-        (22, "Rail Fence Cipher", "rail_fence", "Zig-zag: rank every rail count and offset, decrypt, encrypt"),
-        (23, "Matrix Permutation Solver", "permutation_solver", "Keyless column order: brute force or annealing, 4 layouts"),
-        (24, "Routes & Irregular", "transposition_screen", "Routes, spirals, double rotation, Myszkowski, AMSCO: ranked"),
+    ("1x Monoalphabetic", [
+        (11, "Caesar Cipher", "caesar", "Single shift: decrypt with a known shift or rank every shift"),
+        (12, "Affine Cipher", "affine", "a*x + b mod m: rank every valid key by n-gram score"),
+        (13, "Substitution Solver", "simulated_annealing", "Any simple substitution, no key needed: n-gram annealing"),
+        (14, "Word Pattern Attack", "pattern_isomorphism", "Spaced text: word shapes give one consistent letter mapping"),
     ]),
-    ("Cryptanalysis", [
-        (30, "Vigenere Auto-Solver", "vigenere_auto_solver", "Key length (tested) and key by frequencies; Vigenere and Beaufort"),
-        (31, "Annealing: Substitution", "simulated_annealing", "Breaks simple (monoalphabetic) substitution with n-grams"),
-        (32, "Annealing: Transposition", "simulated_annealing_transposition", "Finds the column order of a columnar transposition"),
-        (33, "Word Pattern Isomorphism", "pattern_isomorphism", "Word shapes + one consistent mapping for a spaced substitution"),
-        (34, "Crib Dragging", "crib_drag", "Slide a probable word; rank the key fragments it implies"),
-        (35, "Kasiski Examination", "kasiski", "Repeated sequences point to likely key lengths"),
-        (36, "Friedman Test", "friedman_test", "Estimate a polyalphabetic key length from the IoC"),
-        (37, "Two-Layer Solver", "two_layer", "Two stacked layers (sub / trans / Vigenere) solved jointly"),
-        (38, "Known-Plaintext Columnar", "crib_columnar_search", "Every column order + periodic key fitting known letters (C/GPU)"),
-        (39, "Unknown Cipher Analyzer", "cipher_analyzer", "No clues? Statistics, ranked attack pathways, quick solves, hill-climb"),
+    ("2x Periodic key", [
+        (21, "Vigenere Auto-Solver", "vigenere_auto_solver", "Fast first try: key length and key by frequencies (+ Beaufort)"),
+        (22, "Vigenere Workbench", "vigenere", "Known key, dictionary attack, or anneal the key"),
+        (23, "Beaufort Cipher", "beaufort", "P = K - C: decrypt, dictionary attack, annealing"),
+        (24, "Porta Cipher", "porta", "Reciprocal 13-alphabet cipher: decrypt, dictionary, annealing"),
+        (25, "Gronsfeld Cipher", "Gronsfeld", "Vigenere with a digit key 0-9: exhaustive search or annealing"),
+        (26, "Quagmire I-III", "keyword_periodic", "Periodic key on keyword alphabets: every dictionary word"),
     ]),
-    ("Utilities", [
-        (40, "Index of Coincidence", "ioc", "Monoalphabetic or polyalphabetic? English ~0.066"),
-        (41, "Frequency Analysis", "freq_analysis", "Letter, bigram and trigram counts vs English"),
-        (42, "Matrix Generator", "Matrix Generator", "Write a string into every n x m grid"),
-        (43, "Text Formatter", "text_formatter", "Clean and reshape ciphertext"),
-        (44, "Keyword Alphabet", "keyword_alphabet", "Build mixed alphabets from a keyword"),
-        (45, "Native Engines", "native_tools", "Build the C engines; list, tune and enable GPUs (OpenCL)"),
+    ("3x Aperiodic / long key", [
+        (31, "Autokey (Autoclave)", "autoclave", "Recover the primer of an autokey with no word list; decrypt"),
+        (32, "Running Key", "running_key", "Book-text key: decrypt with the text, or crib-drag a word"),
+        (33, "Crib Dragging", "crib_drag", "Slide a probable word; rank the key fragments it implies"),
+        (34, "Gromark Solver", "gromark_solver", "Ciphertext only: screen every primer, climb the mixed alphabet"),
     ]),
+    ("4x Transposition", [
+        (41, "Rail Fence", "rail_fence", "Zig-zag: rank every rail count and offset; decrypt, encrypt"),
+        (42, "Scytale", "Scytale", "Rod transposition: try every grid width"),
+        (43, "Routes & Irregular", "transposition_screen", "Routes, spirals, double rotation, Myszkowski, AMSCO: ranked"),
+        (44, "Column-Order Solver", "permutation_solver", "No key: brute force to width 9, annealing above; 4 layouts"),
+        (45, "Keyed & Double Columnar", "columnar_transposition", "Keyword dictionary, double columnar, decrypt with a known key"),
+    ]),
+    ("5x Polygraphic & Bifid", [
+        (51, "Playfair Cipher", "playfair", "5x5 digraphs: anneal the square (no key), or dictionary"),
+        (52, "Four-Square Cipher", "four_square", "Two keyed squares: decrypt or anneal"),
+        (53, "Bifid / Trifid Solver", "fractionation_solver", "Ciphertext only: anneal the square or cube, every period"),
+        (54, "Hill Cipher", "hill", "2x2/3x3 matrix: ciphertext-only, known plaintext, decrypt"),
+    ]),
+    ("6x Two layers & cribs", [
+        (61, "Two-Layer Solver", "two_layer", "Two stacked layers (sub / trans / Vigenere) solved jointly"),
+        (62, "Crib Columnar Search", "crib_columnar_search", "Known letters at known spots: every column order + periodic key"),
+    ]),
+    ("7x Encode / decode", [
+        (71, "Gromark (known key)", "Gromark_transposition", "Decrypt with a known keyword and primer; known-answer test"),
+        (72, "Bifid (known key)", "bifid", "Encrypt or decrypt full-length Bifid with a keyed square"),
+        (73, "Polybius Square", "polybius", "Letters to grid coordinates and back"),
+        (74, "Modular Add / Subtract", "modular_add_sub", "Add or subtract a key mod n; word-list keys ranked by n-grams"),
+        (75, "XOR Cipher", "xor", "XOR text with a key; try keys from a word list"),
+    ]),
+    ("8x Utilities", [
+        (81, "Text Formatter", "text_formatter", "Clean, reshape or reverse ciphertext"),
+        (82, "Keyword Alphabet", "keyword_alphabet", "Build mixed alphabets from a keyword"),
+        (83, "Matrix Generator", "Matrix Generator", "Write a string into every n x m grid"),
+    ]),
+    ("9x Setup", [
+        (91, "C Engines & GPU", "native_tools", "Build the C engines (needed by the solvers); enable OpenCL GPUs"),
+        (92, "Compute Settings", "compute", "Worker processes and priority for searches (also key P)"),
+    ]),
+    # Hotkeys only (footer); must stay the LAST category.
     ("System", [
-        ("C", "Session ciphertext", "session", "Set the ciphertext once; every tool offers it (Enter = use it)"),
-        ("H", "Help", "help", "How to use the toolkit, tool by tool"),
+        ("H", "Help", "help", "Workflow, keys, tools by family, old-to-new number table"),
         ("A", "About", "about", "Version, credits and data sources"),
         ("Q", "Exit", "exit", "Leave the toolkit"),
     ]),
 ]
 
+# Short family names for the footer breadcrumb (same order as CATEGORIES).
+FAMILY = ["Start", "Mono", "Periodic", "Aperiodic", "Transposition", "Polygraphic", "Layers", "Encode",
+          "Utilities", "Setup", "System"]
+
+# Numbers before the v2.1 menu (shown as "(was NN)" and used to read old references).
+OLD_TO_NEW = {39: 1, 40: 2, 41: 3, 35: 4, 36: 5, 8: 11, 10: 12, 31: 13, 33: 14, 30: 21, 1: 22, 13: 23, 14: 24,
+              3: 25, 17: 26, 4: 31, 16: 32, 34: 33, 19: 34, 22: 41, 21: 42, 24: 43, 23: 44, 32: 44, 20: 45,
+              9: 51, 15: 52, 18: 53, 5: 54, 37: 61, 38: 62, 2: 71, 12: 72, 11: 73, 7: 74, 6: 75, 43: 81,
+              44: 82, 42: 83, 45: 91, 46: 92}
+NEW_TO_OLD = {}
+for _old, _new in OLD_TO_NEW.items():
+    NEW_TO_OLD.setdefault(_new, []).append(_old)
+
 ITEMS = [item for _, items in CATEGORIES for item in items]
-# The tool grid; the System entries are hotkeys (C, H, A, Q) shown in the footer.
-GRID_CATEGORIES = [category for category in CATEGORIES if category[0] != "System"]
+# The tool grid; the System entries are hotkeys (H, A, Q) shown in the footer.
+GRID_CATEGORIES = CATEGORIES[:-1]
 NAV_ITEMS = [item for _, items in GRID_CATEGORIES for item in items]
+FAMILY_OF = {id(item): FAMILY[index] for index, (_, items) in enumerate(CATEGORIES) for item in items}
+FAMILY_STARTS = [NAV_ITEMS.index(items[0]) for _, items in GRID_CATEGORIES]
 _loaded_modules = {}
+
+
+def resolve_tool(reference, legacy_numbers=False):
+    """A menu item from a module name or a menu number, else None. Old and new
+    numbers overlap (old 1 was Vigenere, new 1 is the analyzer), so a caller
+    holding pre-v2.1 numbers must pass legacy_numbers=True."""
+    for item in NAV_ITEMS:
+        if item[2] == reference:
+            return item
+    if isinstance(reference, str) and reference.strip().isdigit():
+        reference = int(reference)
+    if isinstance(reference, int):
+        if legacy_numbers:
+            reference = OLD_TO_NEW.get(reference)
+        return next((item for item in NAV_ITEMS if item[0] == reference), None)
+    if isinstance(reference, str):
+        return next((item for item in NAV_ITEMS if str(item[0]).upper() == reference.strip().upper()), None)
+    return None
 
 
 def load_module(file_name):
@@ -214,8 +262,9 @@ def pad(text, length):
 
 def build_columns(column_count):
     """Menu entries as ("header" | "item" | "blank", payload), per column.
-    The System entries are hotkeys (C, H, A, Q) listed in the footer."""
-    blocks = [[("header", name)] + [("item", item) for item in items] for name, items in GRID_CATEGORIES]
+    Blocks: 0 Start, 1-6 solve by family, 7 encode, 8 utilities, 9 setup."""
+    blocks = [[("header", index)] + [("item", item) for item in items]
+              for index, (_, items) in enumerate(GRID_CATEGORIES)]
 
     def stack(*indices):
         column = []
@@ -224,15 +273,15 @@ def build_columns(column_count):
         return column[:-1]
 
     if column_count >= 3:
-        return [stack(0), stack(1, 2), stack(3)]
+        return [stack(0, 1, 2), stack(3, 4, 5), stack(6, 7, 8, 9)]
     if column_count == 2:
-        return [stack(0, 1), stack(2, 3)]
-    return [stack(0, 1, 2, 3)]
+        return [stack(0, 1, 2, 3), stack(4, 5, 6, 7, 8, 9)]
+    return [stack(*range(len(blocks)))]
 
 
 def layout(columns_count):
-    count = 3 if columns_count >= 132 else 2 if columns_count >= 88 else 1
-    # Columns are joined by two spaces; keep one spare character at the right edge.
+    # Three columns need 31+ characters each: the longest title is 23 characters.
+    count = 3 if columns_count >= 98 else 2 if columns_count >= 88 else 1
     cell = (columns_count - 2 * (count - 1) - 1) // count if count > 1 else max(30, min(columns_count - 2, 60))
     return build_columns(count), min(cell, 46)
 
@@ -255,41 +304,80 @@ def neighbour(columns, item, step):
     return min(rows, key=lambda pair: pair[0])[1] if rows else item
 
 
+def suggested_items():
+    """The analyzer's suggestions for the session ciphertext as menu items, best first."""
+    found = []
+    for reference, note in session.get_suggestions():
+        item = resolve_tool(reference, legacy_numbers=isinstance(reference, int))
+        if item and all(item is not other for other, _ in found):
+            found.append((item, note))
+    return found
+
+
+def needs_c(item):
+    return item[2] not in NO_C_NEEDED
+
+
 def render_menu(selected_index, number_buffer, scroll):
     columns_count, rows = terminal_size()
     columns, cell = layout(columns_count)
     rule_width = min(columns_count - 1, cell * len(columns) + 2 * (len(columns) - 1))
     selected_item = NAV_ITEMS[selected_index]
+    suggestions = suggested_items()
+    suggested = {id(item): note for item, note in suggestions}
+    engines_ready = native_engines_built()
+    has_text = bool(session.get_ciphertext())
 
     def render(entry):
         kind, payload = entry
         if kind == "header":
-            return pad(f" {BLUE}{BOLD}{payload.upper()}{RESET}", cell)
+            colour = ACCENT if payload == 0 else BLUE
+            name = GRID_CATEGORIES[payload][0]
+            tag, _, rest = name.partition(" ")
+            label = f"{tag} {rest.upper()}" if tag[:-1].isdigit() and tag.endswith("x") else name.upper()
+            return pad(f" {colour}{BOLD}{label}{RESET}", cell)
         if kind == "item":
             label = f"{str(payload[0]):>2}"
-            title = payload[1][:cell - 8]
+            title = payload[1]
+            if payload[2] == "session" and has_text:
+                title = "Change ciphertext"
+            title = title[:cell - 8]
             if payload is selected_item:
                 return pad(f"{REVERSE}{BOLD} ▶ {label}  {title} ", cell) + RESET
-            return pad(f"   {YELLOW}{label}{RESET}  {title}", cell)
+            dot = f"{CYAN}•{RESET}" if id(payload) in suggested else " "
+            dim = GREY if not engines_ready and needs_c(payload) else ""
+            return pad(f"  {dot}{YELLOW}{label}{RESET}  {dim}{title}{RESET}", cell)
         return " " * cell
 
+    # ---- header: title + engine status, then one line saying what to do next
     out = []
     body_rows = max(len(column) for column in columns)
+    status = (f"{GREY}C engines ready{RESET}" if engines_ready else f"{YELLOW}C engines not built: open 91{RESET}")
     if rows >= body_rows + len(LOGO) + 8:
         out += [f"  {ACCENT}{line}{RESET}" for line in LOGO]
-        out.append(f"  {BOLD}CIPHER CRACKER TOOLKIT{RESET}  {GREY}v{VERSION} · classical cryptanalysis · {datetime.now():%Y-%m-%d %H:%M}{RESET}")
+    title = f"  {ACCENT}{BOLD}CIPHER CRACKER TOOLKIT{RESET}  {GREY}v{VERSION}{RESET}"
+    gap = max(2, rule_width - len(_ANSI.sub("", title)) - len(_ANSI.sub("", status)))
+    out.append(title + " " * gap + status)
+    if not has_text:
+        guide = ("▶ Start: press C to paste your ciphertext, then 1 = Unknown Cipher Analyzer" if columns_count >= 92
+                 else "▶ Start: C = ciphertext, then 1 = Analyzer")
+        out.append(f"  {YELLOW}{guide}{RESET}")
     else:
-        out.append(f"  {ACCENT}{BOLD}CIPHER CRACKER TOOLKIT{RESET}  {GREY}v{VERSION}{RESET}")
-    engines = "" if native_engines_built() else f"  {YELLOW}C engines not built: 45{RESET}"
-    room = columns_count - (30 if engines else 0)
-    if session.get_ciphertext():
-        out.append(f"  {GREY}Session ciphertext:{RESET} {CYAN}{session.summary(max(20, room - 40))}{RESET}"
-                   f"  {GREY}C change{RESET}{engines}")
-    else:
-        detail = ": every tool then offers it, or start with 39" if room >= 92 else ""
-        out.append(f"  {GREY}No session ciphertext. Press {YELLOW}C{GREY} to set one{detail}.{RESET}{engines}")
+        if suggestions:
+            numbers = " ".join(f"•{item[0]}" for item, _ in suggestions)
+            tail = f"Suggested: {numbers}  (N = next)"
+        else:
+            tail = "▶ Next: 1 Analyzer"
+        letters = sum(ch.isalpha() for ch in session.get_ciphertext())
+        # summary(room) is the preview (room characters) plus " (N letters)"
+        room = columns_count - 1 - len("  Ciphertext: ") - 2 - len(tail) - len(f" ({letters} letters)")
+        if room >= 8:
+            out.append(f"  {GREY}Ciphertext:{RESET} {CYAN}{session.summary(room)}{RESET}  {YELLOW}{tail}{RESET}")
+        else:
+            out.append(f"  {YELLOW}{tail[:columns_count - 3]}{RESET}")
     out.append(f"{GREY}{'─' * rule_width}{RESET}")
 
+    # ---- body
     available = rows - len(out) - 4
     if body_rows <= available:
         for row in range(body_rows):
@@ -300,19 +388,34 @@ def render_menu(selected_index, number_buffer, scroll):
         window = max(5, available - 2)
         scroll = min(max(scroll, position - window + 1), position)
         if scroll > 0:
-            out.append(f"   {GREY}↑ {scroll} more{RESET}")
+            first = next((e[1] for e in column[scroll:] if e[0] == "item"), selected_item)
+            out.append(f"   {GREY}↑ {scroll} more · {FAMILY_OF[id(first)]}{RESET}")
         out += [render(entry) for entry in column[scroll:scroll + window]]
         if len(column) > scroll + window:
             out.append(f"   {GREY}↓ {len(column) - scroll - window} more{RESET}")
 
+    # ---- footer: family › title · description, then the keys
     out.append(f"{GREY}{'─' * rule_width}{RESET}")
     limit = columns_count - 2
-    title = selected_item[1][:limit]
-    description = selected_item[3][:max(0, limit - len(title) - 3)]
-    out.append(f" {CYAN}{title}{RESET} {GREY}·{RESET} {description}")
-    arrows = "↑↓←→ move" if len(columns) > 1 and body_rows <= available else "↑↓ move"
-    hint = (f"{arrows} · type a number · Enter open · C session text · H help · A about · Q quit" if columns_count >= 92
-            else f"{arrows} · number = jump · Enter · C text · H help · Q quit")
+    description = selected_item[3]
+    if id(selected_item) in suggested:
+        description = f"Analyzer: {suggested[id(selected_item)]}"
+    if not engines_ready and needs_c(selected_item):
+        description += " · needs C engines (91)"
+    old = NEW_TO_OLD.get(selected_item[0])
+    was = f" (was {'/'.join(map(str, old))})" if old else ""
+    crumb = f" {GREY}{FAMILY_OF[id(selected_item)]} ›{RESET} {CYAN}{selected_item[1]}{RESET} {GREY}·{RESET} "
+    room = max(0, limit - len(_ANSI.sub("", crumb)))
+    text = description if len(description) + len(was) > room else description + was
+    out.append(crumb + text[:room] + (f"{GREY}{was}{RESET}" if False else ""))
+    nav = "↑↓←→ move" if len(columns) > 1 and body_rows <= available else "↑↓ move"
+    next_key = " · N next suggested" if suggestions else ""
+    if columns_count >= 110:
+        hint = f"{nav} · PgUp/PgDn family · type a number · Enter open · C text{next_key} · P compute · H help · Q quit"
+    elif columns_count >= 92:
+        hint = f"{nav} · PgDn family · number = jump · Enter · C text{' · N next' if suggestions else ''} · H help · Q quit"
+    else:
+        hint = "↑↓ move · PgDn family · number = jump · Enter · C text · H help · Q quit"
     jump = f"Go to: {number_buffer}_" if number_buffer else ""
     if jump and len(hint) + len(jump) + 3 > limit:
         hint = ""
@@ -323,10 +426,20 @@ def render_menu(selected_index, number_buffer, scroll):
     return scroll
 
 
-def select_menu_option(selected=0):
+def initial_selection():
+    """Cursor on C with no ciphertext, on the top suggestion after an analysis, else on 1."""
+    suggestions = suggested_items()
+    if suggestions:
+        return NAV_ITEMS.index(suggestions[0][0])
+    if not session.get_ciphertext():
+        return NAV_ITEMS.index(find_item("session"))
+    return NAV_ITEMS.index(find_item("cipher_analyzer"))
+
+
+def select_menu_option(selected=None):
     """Interactive menu; returns (item, index of the selection in NAV_ITEMS)."""
     number_buffer, scroll = "", 0
-    selected = min(selected, len(NAV_ITEMS) - 1)
+    selected = initial_selection() if selected is None else min(selected, len(NAV_ITEMS) - 1)
     clear_screen()
     hide_cursor()
     try:
@@ -336,7 +449,7 @@ def select_menu_option(selected=0):
             if not key:
                 continue
             if len(key) == 1 and key.isdigit():
-                # Multi-digit jump: "3" then "7" selects tool 37.
+                # Multi-digit jump: "4" then "4" selects tool 44; 1-5 open the Start block.
                 for candidate in (number_buffer + key, key):
                     matches = [i for i, item in enumerate(NAV_ITEMS) if str(item[0]).startswith(candidate)]
                     if matches:
@@ -358,14 +471,20 @@ def select_menu_option(selected=0):
                 selected = NAV_ITEMS.index(order[(position + 1) % len(order)])
             elif key in ('LEFT', 'RIGHT'):
                 selected = NAV_ITEMS.index(neighbour(columns, NAV_ITEMS[selected], -1 if key == 'LEFT' else 1))
-            elif key == 'PAGE_UP':
-                selected = NAV_ITEMS.index(order[max(0, position - 8)])
-            elif key == 'PAGE_DOWN':
-                selected = NAV_ITEMS.index(order[min(len(order) - 1, position + 8)])
+            elif key in ('PAGE_UP', 'PAGE_DOWN'):
+                block = max(i for i, start in enumerate(FAMILY_STARTS) if start <= selected)
+                block = (block + (1 if key == 'PAGE_DOWN' else -1)) % len(FAMILY_STARTS)
+                selected = FAMILY_STARTS[block]
             elif key == 'HOME':
-                selected = NAV_ITEMS.index(order[0])
+                selected = 0
             elif key == 'END':
-                selected = NAV_ITEMS.index(order[-1])
+                selected = len(NAV_ITEMS) - 1
+            elif key in ('n', 'N'):
+                suggestions = [NAV_ITEMS.index(item) for item, _ in suggested_items()]
+                if suggestions:
+                    later = [i for i in suggestions if suggestions.index(i) > suggestions.index(selected)] \
+                        if selected in suggestions else []
+                    selected = (later or suggestions)[0]
             elif key == 'ENTER':
                 return NAV_ITEMS[selected], selected
             elif key in ('ESC', 'q', 'Q', 'e', 'E'):
@@ -376,6 +495,8 @@ def select_menu_option(selected=0):
                 return find_item('about'), selected
             elif key in ('c', 'C'):
                 return find_item('session'), selected
+            elif key in ('p', 'P'):
+                return find_item('compute'), selected
     finally:
         show_cursor()
 
@@ -409,42 +530,53 @@ def pause(message="Press Enter to return to the menu..."):
 def show_help():
     clear_screen()
     banner("Help", "How to use the Cipher Cracker Toolkit")
+    Y, R = YELLOW, RESET
     print(f"""
-{BOLD}Getting around{RESET}
-  Arrow keys (or W/S) move, Left/Right switch column, typing a tool's number
-  jumps to it (e.g. {YELLOW}37{RESET}), Enter opens it. Inside a tool, {YELLOW}Ctrl+C{RESET} stops
-  the current step and returns to this menu.
+{BOLD}The workflow for an unknown ciphertext{RESET}
+  {Y}C{R}   Set the ciphertext once (paste several lines, or a .txt path). Every tool's
+      ciphertext prompt then accepts Enter to use it.
+  {Y}1{R}   Unknown Cipher Analyzer: measures the text against English and random text
+      of the same length, ranks the cipher families, runs the instant attacks and
+      can hill-climb a pathway. Its suggested tools get a {CYAN}•{R} in this menu;
+      {Y}N{R} jumps from one suggestion to the next.
+  {Y}2-5{R} The identification statistics by hand (IoC, frequencies, Kasiski, Friedman).
+  Then open the family block that fits, and check a recovered key in {Y}7x{R}.
 
-{BOLD}Session ciphertext{RESET}
-  {YELLOW}C{RESET} sets the ciphertext once (paste several lines, or a .txt path). Every
-  tool's ciphertext prompt then accepts Enter to use it. Tool 39 sets it too.
+{BOLD}Which block?{RESET}  (what the analyzer's statistics say)
+  English-like IoC, letters disguised, adjacent pairs English   -> {Y}1x{R} monoalphabetic
+  English-like IoC, English letters, order scrambled             -> {Y}4x{R} transposition
+  English-like IoC, letters disguised, order scrambled           -> {Y}61{R} two layers
+  Flattened IoC with a clear key length                          -> {Y}2x{R} periodic key
+  Flattened IoC, no key length                                   -> {Y}3x{R} aperiodic, {Y}61{R}
+  25 letters, even length, no doubled pair at 1-2, 3-4, ...      -> {Y}5x{R} Playfair/Bifid
+  Known letters at known positions                               -> {Y}62{R} crib search
 
-{BOLD}A typical workflow for an unknown ciphertext{RESET}
-  0. {YELLOW}39{RESET} Unknown Cipher Analyzer does steps 1-3 for you, ranks the attack
-     pathways with the tools to open, runs the instant attacks and can
-     hill-climb a pathway. The manual route:
-  1. {YELLOW}40{RESET} Index of Coincidence: ~0.066 means letter frequencies are intact
-     (substitution and/or transposition); ~0.04 suggests a polyalphabetic key.
-  2. {YELLOW}41{RESET} Frequency Analysis: English-like frequencies point to transposition.
-  3. {YELLOW}35{RESET}/{YELLOW}36{RESET} Kasiski / Friedman estimate a polyalphabetic key length.
-  4. Solve: {YELLOW}31{RESET} substitution, {YELLOW}32{RESET}/{YELLOW}23{RESET} transposition, {YELLOW}30{RESET}/{YELLOW}1{RESET} Vigenere,
-     or {YELLOW}37{RESET} when two layers were stacked. With known plaintext at known
-     positions, {YELLOW}38{RESET} tests every column order + periodic key exhaustively.
+{BOLD}Keys{RESET}
+  Arrows (or W/S) move; Left/Right switch column; PgUp/PgDn jump between family
+  blocks; typing a number jumps to it (e.g. {Y}44{R}); Enter opens. {Y}C{R} ciphertext,
+  {Y}P{R} compute settings, {Y}N{R} next suggested tool, {Y}H{R} help, {Y}A{R} about, {Y}Q{R} quit.
+  Inside a tool, {Y}Ctrl+C{R} stops the current step and returns to this menu.
 
 {BOLD}Speed{RESET}
-  {YELLOW}45{RESET} Native Engines builds the C engines (python -m pip install ziglang first)
-  and enables a GPU. The transposition brute force and annealers (23, 32) and
-  tool 38 then run in C or on the GPU, with the same results as the Python code.
+  Every annealing, dictionary and large brute-force search runs in the C engines
+  (small keyspaces such as Caesar loop around C scoring). Build them once with
+  {Y}91{R} (python -m pip install ziglang first). {Y}92{R} / {Y}P{R} sets how many worker processes
+  searches may use and their priority, so the computer stays usable.
 
 {BOLD}Scoring{RESET}
   Solvers rank candidate plaintexts with English n-gram statistics (5-grams by
   default, AZdecrypt data in N-grams/). "Fitness" is higher-is-better; "N-gram
   cost/score" is lower-is-better. Several independent runs that agree on the
   same plaintext are strong evidence of a real solution.""")
-    for name, items in CATEGORIES[:-1]:
+    for name, items in GRID_CATEGORIES:
         section(name)
         for key, title, _, description in items:
-            print(f"  {YELLOW}{str(key):>2}{RESET}  {title:<26} {GREY}{description}{RESET}")
+            print(f"  {YELLOW}{str(key):>2}{RESET}  {title:<24} {GREY}{description}{RESET}")
+    section("Numbers before v2.1 -> now")
+    pairs = sorted(OLD_TO_NEW.items())
+    for start in range(0, len(pairs), 8):
+        print("  " + "   ".join(f"{GREY}{old:>2}{RESET}->{YELLOW}{new:<2}{RESET}" for old, new in pairs[start:start + 8]))
+    print(f"  {GREY}(old 23 and 32 are now one tool, 44){RESET}")
     pause()
 
 
@@ -483,17 +615,14 @@ def edit_session():
     if text.strip():
         session.set_ciphertext(text)
         print(f"{GREEN}Session ciphertext set: {session.summary(60)}{RESET}")
-        print(f"{GREY}Tip: 39 Unknown Cipher Analyzer ranks the attack pathways for it.{RESET}")
+        print(f"{GREY}Next: 1 Unknown Cipher Analyzer ranks the attack pathways for it.{RESET}")
         pause()
 
 
-# Tools whose column-order searches have C (and GPU) engines, with the measured
-# speed-up from the README (Python vs C, same results).
-NATIVE_TOOLS = {
-    "permutation_solver": "brute force ~9x faster (width 8: 47,000 -> 417,000 orders/s)",
-    "simulated_annealing_transposition": "the annealing loop runs in C",
-    "crib_columnar_search": "~80x faster (width 8, 97 letters: 11.6 s -> 0.14 s)",
-}
+# Every solver runs its searches in the C engines (there is no Python fallback).
+# These tools never use them, so they open without the build.
+NO_C_NEEDED = {"polybius", "bifid", "kasiski", "friedman_test", "ioc", "freq_analysis", "Matrix Generator",
+               "text_formatter", "keyword_alphabet", "native_tools", "compute", "help", "about", "session", "exit"}
 
 
 def native_engines_built() -> bool:
@@ -504,32 +633,37 @@ def native_engines_built() -> bool:
         return False
 
 
-def offer_native_build(file_name):
-    """Before a tool with C engines runs in pure Python: say so and offer to build them."""
-    if file_name not in NATIVE_TOOLS or native_engines_built():
-        return
-    print(f"{YELLOW}The C engines are not built: this tool will run in pure Python.{RESET} "
-          f"{GREY}With them: {NATIVE_TOOLS[file_name]}.{RESET}")
-    choice = input(f"{YELLOW}B{RESET} = build them now (a few seconds), Enter = continue in Python: ").strip().lower()
-    if choice != "b":
-        print()
-        return
+def build_native_engines() -> bool:
+    """Build the C engines in place (zig's C compiler from pip). Returns success."""
     try:
         import ziglang  # noqa: F401
     except ImportError:
-        print(f"{RED}The compiler is missing. Run  python -m pip install ziglang  then press B again "
-              f"(or use 45 Native Engines).{RESET}")
-        pause("Press Enter to continue in Python...")
-        return
+        print(f"{RED}The compiler is missing. Run  {YELLOW}python -m pip install ziglang{RED}  and try again "
+              f"(no Visual Studio or gcc needed).{RESET}")
+        return False
     import native_tools
-    native_tools.build()
-    print()
+    return bool(native_tools.build())
+
+
+def ensure_native(file_name) -> bool:
+    """Tools that search need the C engines: offer to build them; False = do not open the tool."""
+    if file_name in NO_C_NEEDED or native_engines_built():
+        return True
+    print(f"{YELLOW}This tool runs its searches in the C engines, which are not built yet.{RESET}\n"
+          f"{GREY}They are built once per machine (a few seconds) with zig's C compiler from pip.{RESET}")
+    if input(f"{YELLOW}B{RESET} = build them now, Enter = back to the menu: ").strip().lower() != "b":
+        return False
+    built = build_native_engines()
+    if not built:
+        pause("Press Enter to return to the menu...")
+    return built
 
 
 def run_module(item):
     _, title, file_name, _ = item
     clear_screen()
-    offer_native_build(file_name)
+    if not ensure_native(file_name):
+        return
     module, error = load_module(file_name)
     if module is None:
         banner("Tool unavailable", title)
@@ -540,17 +674,39 @@ def run_module(item):
         module.run()
     except KeyboardInterrupt:
         print(f"\n{YELLOW}Interrupted.{RESET}")
-    except Exception:
+    except Exception as error:
+        if type(error).__name__ == "NativeUnavailable":
+            print(f"\n{RED}{error}{RESET}")
+            pause()
+            return
         print(f"\n{RED}The tool stopped with an error:{RESET}")
         traceback.print_exc()
     pause()
+
+
+def startup_build_check(interactive):
+    """The solvers need the C engines: on a machine without them, offer the build once at start."""
+    if native_engines_built() or not interactive:
+        return
+    clear_screen()
+    banner("C engines needed", "The toolkit's solvers run in C; build them once on this machine")
+    print(f"\n  Every annealing, dictionary and large brute-force search runs in the\n"
+          f"  toolkit's C library. It is built once per machine with zig's C compiler, a pip package:\n\n"
+          f"    {YELLOW}python -m pip install ziglang{RESET}\n    {YELLOW}python scripts/native_tools.py build{RESET}"
+          f"   {GREY}(or menu 91){RESET}\n")
+    if input(f"{YELLOW}B{RESET} = build now, Enter = continue to the menu (utilities only): ").strip().lower() == "b":
+        build_native_engines()
+        pause("Press Enter to open the menu...")
 
 
 def main():
     if 'idlelib' not in sys.modules and sys.stdout.isatty():
         retro_effect()
     interactive = sys.stdin.isatty()
-    selected = 0
+    startup_build_check(interactive)
+    import compute
+    compute.startup_prompt(interactive)
+    selected = None          # None = let the menu place the cursor (C, 1 or the top suggestion)
     while True:
         try:
             if interactive:
@@ -571,8 +727,12 @@ def main():
                 show_about()
             elif action == 'session':
                 edit_session()
+                if session.get_ciphertext():
+                    selected = NAV_ITEMS.index(find_item('cipher_analyzer'))   # next step: analyze it
             else:
                 run_module(item)
+                if action == 'cipher_analyzer':
+                    selected = None      # land on the analyzer's top suggestion
         except KeyboardInterrupt:
             clear_screen()
             print(f"{GREEN}Goodbye!{RESET}")

@@ -4,7 +4,9 @@ against a dictionary, then search for ONE letter mapping that turns every word
 into a dictionary word at the same time (beam search, most constrained words
 first, one-to-one letters). Candidate words are ranked by how English they
 look on 3-grams, since the word list has no frequencies and includes many rare
-words.
+words. The pattern matching, the word scores and the beam search run in C
+(native/screens_pattern.c); the annealer runs come from the C layered engine
+(two_layer.solve_job).
 """
 import os
 import re
@@ -13,6 +15,9 @@ from functools import lru_cache
 from theme import BOLD, CYAN, GREEN, GREY, RED, RESET, YELLOW, banner
 
 dictionary_path = os.path.join(os.path.dirname(__file__), "data", "words_alpha.txt")
+# Words shorter than 3 letters have no 3-gram score: these score 120, others 60.
+SHORT_COMMON = ("A", "I", "AN", "AS", "AT", "BE", "BY", "DO", "GO", "HE", "IF", "IN", "IS", "IT",
+                "ME", "MY", "NO", "OF", "ON", "OR", "SO", "TO", "UP", "US", "WE")
 
 
 def get_word_pattern(word):
@@ -27,93 +32,37 @@ def get_word_pattern(word):
 
 
 @lru_cache(maxsize=1)
-def load_pattern_dict():
-    patterns = {}
+def load_dictionary():
+    """The word list as a native.screens.PatternDictionary: A-Z words only
+    (entries with other characters are left out), each word once, 'A' and 'I'
+    the only one-letter words; every word scored on 3-grams in C."""
+    import native
+    from native.screens import PatternDictionary
+    from ngram_scoring import load_ngram_scores, resolve_ngram_path
+    native.require()
+    words = {}
     try:
         with open(dictionary_path, 'r', encoding='utf-8') as f:
             for line in f:
                 word = line.strip().upper()
-                if len(word) > 1 or word in ("A", "I"):
-                    patterns.setdefault(get_word_pattern(word), []).append(word)
+                if word.isascii() and word.isalpha() and (len(word) > 1 or word in ("A", "I")):
+                    words[word] = None
     except FileNotFoundError:
         print(f"{RED}Dictionary not found at {dictionary_path}{RESET}")
-    return patterns
+    return PatternDictionary(list(words), load_ngram_scores(resolve_ngram_path(3)).scores, 3, SHORT_COMMON)
 
 
-@lru_cache(maxsize=1)
-def _trigram_model():
-    from ngram_scoring import load_ngram_scores, resolve_ngram_path
-    return load_ngram_scores(resolve_ngram_path(3))
-
-
-def word_score(word):
-    """Mean 3-gram score of the word (0-255; higher = more English-looking)."""
-    from ngram_scoring import ngram_total, text_to_codes
-    model = _trigram_model()
-    codes = text_to_codes(word)
-    windows = len(codes) - 2
-    if windows <= 0:
-        return 120.0 if word in ("A", "I", "AN", "AS", "AT", "BE", "BY", "DO", "GO", "HE", "IF", "IN", "IS", "IT",
-                                 "ME", "MY", "NO", "OF", "ON", "OR", "SO", "TO", "UP", "US", "WE") else 60.0
-    return ngram_total(codes, model.scores, 3) / windows
-
-
-def candidates_for(word, patterns, limit=400):
-    matches = patterns.get(get_word_pattern(word), [])
-    return sorted(matches, key=lambda w: -word_score(w))[:limit]
+def candidates_for(word, limit=400):
+    """(number of dictionary words with the pattern of ``word``, the most
+    English-looking ``limit`` of them, best first)."""
+    return load_dictionary().matches(word, limit)
 
 
 def solve(cipher_words, beam=300, per_word=400):
-    """Best joint letter mappings, best first: list of (score, mapping dict)."""
-    patterns = load_pattern_dict()
-    distinct = list(dict.fromkeys(w for w in cipher_words if w))
-    options = {w: candidates_for(w, patterns, per_word) for w in distinct}
-    order = sorted((w for w in distinct if options[w]), key=lambda w: (len(options[w]), -len(w)))
-    beams = [(0.0, {}, {})]          # (score, cipher->plain, plain->cipher)
-    for word in order:
-        expanded = []
-        everything = patterns.get(get_word_pattern(word), [])
-        index = {}                   # (position, letter) -> set of dictionary words, built on demand
-        filtered = {}
-        for score, forward, backward in beams:
-            # Letters already fixed by earlier words select from the WHOLE word list
-            # (a common word can rank low on 3-grams); otherwise use the ranked top.
-            known = tuple(forward.get(c) for c in word)
-            if known not in filtered:
-                fixed = [(i, letter) for i, letter in enumerate(known) if letter]
-                if fixed:
-                    sets = []
-                    for i, letter in fixed:
-                        if (i, letter) not in index:
-                            index[(i, letter)] = {w for w in everything if w[i] == letter}
-                        sets.append(index[(i, letter)])
-                    pool = set.intersection(*sets) if sets else set()
-                    filtered[known] = sorted(pool, key=lambda w: -word_score(w))[:per_word]
-                else:
-                    filtered[known] = options[word]
-            for candidate in filtered[known]:
-                new_forward, new_backward, ok = None, None, True
-                for c, p in zip(word, candidate):
-                    mapped = forward.get(c) if new_forward is None else new_forward.get(c)
-                    if mapped is not None:
-                        if mapped != p:
-                            ok = False
-                            break
-                        continue
-                    owner = backward.get(p) if new_backward is None else new_backward.get(p)
-                    if owner is not None and owner != c:
-                        ok = False
-                        break
-                    if new_forward is None:
-                        new_forward, new_backward = dict(forward), dict(backward)
-                    new_forward[c], new_backward[p] = p, c
-                if ok:
-                    expanded.append((score + word_score(candidate) * len(candidate),
-                                     new_forward or forward, new_backward or backward))
-        if expanded:                 # a word nothing fits (a name?) is skipped, not fatal
-            expanded.sort(key=lambda entry: -entry[0])
-            beams = expanded[:beam]
-    return [(score, forward) for score, forward, _ in beams]
+    """Best joint letter mappings, best first: list of (score, mapping dict).
+    Cipher words are A-Z (case is ignored); the search runs in C."""
+    words = [w.upper() for w in cipher_words if w]
+    return load_dictionary().solve(list(dict.fromkeys(words)), beam, per_word)
 
 
 def decode(text, mapping):
@@ -122,7 +71,7 @@ def decode(text, mapping):
 
 @lru_cache(maxsize=1)
 def dictionary_words():
-    return frozenset(w for words in load_pattern_dict().values() for w in words)
+    return frozenset(load_dictionary().words)
 
 
 def word_share(decoded_words):
@@ -142,7 +91,8 @@ def anneal_candidates(cipher_words, runs=4, steps=400_000):
     cipher = text_to_codes("".join(cipher_words))
     jobs = [{'cipher': cipher, 'encryption': [("sub", None)], 'iterations': steps, 'ngram_path': str(DEFAULT_NGRAM_PATH),
              'entropy_weight': 0.5, 'seed': random.randrange(2 ** 32), 'label': 'substitution'} for _ in range(runs)]
-    with ProcessPoolExecutor(max_workers=min(runs, max(1, (os.cpu_count() or 2) - 1))) as pool:
+    import compute
+    with ProcessPoolExecutor(max_workers=compute.workers(runs)) as pool:
         results = list(pool.map(solve_job, jobs))
     joined = "".join(cipher_words)
     mappings = []
@@ -184,13 +134,14 @@ def run():
         print(f"{RED}Need a ciphertext with word spaces (at least two words).{RESET}")
         return
 
-    print(f"\n{YELLOW}Loading dictionary patterns...{RESET}")
-    patterns = load_pattern_dict()
+    import native
+    native.require()
+    print(f"\n{YELLOW}Loading the dictionary...{RESET}")
+    load_dictionary()
 
     print(f"\n{BOLD}Pattern matches, longest words first{RESET} {GREY}(most English-looking first){RESET}")
     for word in sorted(set(words), key=len, reverse=True)[:6]:
-        matches = candidates_for(word, patterns, 10)
-        total = len(patterns.get(get_word_pattern(word), []))
+        total, matches = candidates_for(word, 10)
         print(f"  {GREEN}{word}{RESET} ({get_word_pattern(word)}): "
               + (f"{YELLOW}{', '.join(matches)}{RESET}{GREY}{f' ... ({total} in all)' if total > 10 else ''}{RESET}"
                  if matches else f"{RED}no dictionary word has this pattern (a name?){RESET}"))

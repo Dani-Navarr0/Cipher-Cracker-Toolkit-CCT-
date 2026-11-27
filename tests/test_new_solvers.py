@@ -19,6 +19,31 @@ from test_cipher_profile import PLAINTEXT  # noqa: E402
 NATIVE = native.available()
 
 
+# ---- test-only references (the toolkit itself runs only the C engines)
+
+def reference_ngram_total(codes, scores, size):
+    """Plain loop over every n-gram: what cct_ngram_total must return."""
+    total = 0
+    for i in range(len(codes) - size + 1):
+        index = 0
+        for code in codes[i:i + size]:
+            index = index * 26 + code
+        total += scores[index]
+    return total
+
+
+def reference_gromark_score(cipher, digits, base, logp, sign=1):
+    """What cct_gromark_scores must return for one primer's keystream."""
+    hist = [[0] * base for _ in range(26)]
+    for c, d in zip(cipher, digits):
+        hist[c][d] += 1
+    score = 0.0
+    for c in range(26):
+        if any(hist[c]):
+            score += max(sum(h * logp[(s - sign * d) % 26] for d, h in enumerate(hist[c]) if h) for s in range(26))
+    return score
+
+
 @unittest.skipUnless(NATIVE, "native library not built")
 class NativeKernelTests(unittest.TestCase):
     def test_ngram_total_matches_python(self):
@@ -28,7 +53,7 @@ class NativeKernelTests(unittest.TestCase):
             scores = ns.load_ngram_scores(ns.resolve_ngram_path(size)).scores
             for _ in range(100):
                 codes = bytes(rng.randrange(26) for _ in range(rng.randrange(0, 400)))
-                self.assertEqual(fast.ngram_total(codes, scores, size), ns.ngram_total_python(codes, scores, size))
+                self.assertEqual(fast.ngram_total(codes, scores, size), reference_ngram_total(codes, scores, size))
 
     def test_keyed_chi_matches_python(self):
         import keyword_periodic as kp
@@ -55,7 +80,7 @@ class NativeKernelTests(unittest.TestCase):
         native_scores = fast.gromark_scores(cipher, 10, 5, 1, g.LOGP, 31000, 30)
         for q, value in enumerate(native_scores):
             digits = g.keystream(g.primer_digits(31000 + q, 5, 10), len(cipher))
-            self.assertAlmostEqual(value, g.primer_score_python(cipher, digits, 10), places=6)
+            self.assertAlmostEqual(value, reference_gromark_score(cipher, digits, 10, g.LOGP), places=6)
 
     def test_fraction_and_foursquare_decrypt_match_python(self):
         import fractionation_solver as fs

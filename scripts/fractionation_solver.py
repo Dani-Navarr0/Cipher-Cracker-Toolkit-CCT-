@@ -4,14 +4,13 @@
 Bifid/Trifid with period P: each block of P plaintext letters is written as
 coordinates (rows, columns[, layers]) in rows, read off row by row in groups,
 and the groups become ciphertext letters (period 0 = the whole text as one
-block). Decryption runs in C when the native engines are built.
+block). The whole annealing run is in C (native/digraphic.c); encrypt and
+make_decryptor are one-shot helpers.
 """
 import ctypes
-import math
 import os
 import random
 
-from annealing import Fitness, Schedule, anneal, hill_climb
 from theme import BOLD, CYAN, GREEN, GREY, RED, RESET, YELLOW, banner
 
 KINDS = {
@@ -26,28 +25,6 @@ def to_symbols(text, kind):
     if kind == "bifid":
         text = text.replace("J", "I")
     return bytes(symbols.index(ch) for ch in text if ch in symbols)
-
-
-def decrypt_python(cipher, period, dims, side, cell_of, grid):
-    n = len(cipher)
-    out = bytearray(n)
-    block = period if period > 0 else n
-    for b in range(0, n, block):
-        length = min(block, n - b)
-        seq = []
-        for k in range(length):
-            cell = cell_of[cipher[b + k]]
-            coords = []
-            for _ in range(dims):
-                coords.append(cell % side)
-                cell //= side
-            seq.extend(reversed(coords))
-        for k in range(length):
-            cell = 0
-            for j in range(dims):
-                cell = cell * side + seq[j * length + k]
-            out[b + k] = grid[cell]
-    return bytes(out)
 
 
 def encrypt(plain, period, dims, side, cell_of, grid):
@@ -72,24 +49,19 @@ def encrypt(plain, period, dims, side, cell_of, grid):
 
 
 def make_decryptor(cipher, period, kind):
-    """decrypt(cell_of, grid) -> plaintext symbols; C when available."""
+    """decrypt(cell_of, grid) -> plaintext symbols (C)."""
     spec = KINDS[kind]
     dims, side = spec["dims"], spec["side"]
-    try:
-        import native
-        i32, p = ctypes.c_int32, ctypes.c_char_p
-        function = native.function("cct_fraction_decrypt", None, [p, i32, i32, i32, i32, p, p, p])
-    except Exception:
-        function = None
-    if function is not None:
-        cipher = bytes(cipher)
-        out = ctypes.create_string_buffer(len(cipher))
+    import native
+    i32, p = ctypes.c_int32, ctypes.c_char_p
+    function = native.function("cct_fraction_decrypt", None, [p, i32, i32, i32, i32, p, p, p])
+    cipher = bytes(cipher)
+    out = ctypes.create_string_buffer(len(cipher))
 
-        def decrypt(cell_of, grid):
-            function(cipher, len(cipher), period, dims, side, bytes(cell_of), bytes(grid), out)
-            return out.raw
-        return decrypt
-    return lambda cell_of, grid: decrypt_python(cipher, period, dims, side, cell_of, grid)
+    def decrypt(cell_of, grid):
+        function(cipher, len(cipher), period, dims, side, bytes(cell_of), bytes(grid), out)
+        return out.raw
+    return decrypt
 
 
 def _to_az_table(kind):
@@ -99,51 +71,24 @@ def _to_az_table(kind):
 
 
 def solve(ciphertext, period, kind="bifid", iterations=400_000, seed=None, t_start=10.0):
-    """One annealing run. Returns (fitness, key string, plaintext string)."""
-    import cipher_profile as cp
+    """One annealing run in C over the square (Bifid) or cube (Trifid): swap two
+    cells per move, cooling t_start -> 0.1, then a polish over every single
+    swap. Returns (fitness, key string, plaintext string)."""
+    from native import digraphic
+    from ngram_scoring import DEFAULT_NGRAM_PATH, load_ngram_scores
     if seed is not None:
         random.seed(seed)
     spec = KINDS[kind]
     symbols = spec["symbols"]
     count = len(symbols)
-    cipher = to_symbols(ciphertext, kind)
-    decrypt = make_decryptor(cipher, period, kind)
-    to_az = _to_az_table(kind)
-    fitness = cp.fitness_function()
-    grid = random.sample(range(count), count)
-    cell_of = [0] * count
-    for cell, symbol in enumerate(grid):
-        cell_of[symbol] = cell
-    last = []
-
-    def score():
-        return fitness(decrypt(cell_of, grid).translate(to_az))
-
-    def swap(i, j):
-        grid[i], grid[j] = grid[j], grid[i]
-        cell_of[grid[i]], cell_of[grid[j]] = i, j
-
-    def propose():
-        i, j = random.sample(range(count), 2)
-        swap(i, j)
-        last[:] = [i, j]
-        return score()
-
-    def undo():
-        swap(*last)
-
-    best_grid, _ = anneal(score(), propose, undo, lambda: grid[:], Schedule(iterations, t_start))
-    grid[:] = best_grid
-    for cell, symbol in enumerate(grid):
-        cell_of[symbol] = cell
-
-    def apply_move(move):
-        swap(*move)
-        last[:] = list(move)
-        return score()
-    final = hill_climb(score(), [(i, j) for i in range(count) for j in range(i + 1, count)], apply_move, undo, 10)
-    plain = "".join(symbols[s] for s in decrypt(cell_of, grid))
-    return final, "".join(symbols[s] for s in grid), plain
+    # the model and weight of cipher_profile.fitness_function()
+    cipher = digraphic.make_cipher(digraphic.FRACTION, to_symbols(ciphertext, kind), count, _to_az_table(kind),
+                                   load_ngram_scores(DEFAULT_NGRAM_PATH), period=period, dims=spec["dims"],
+                                   side=spec["side"])
+    final, keys = digraphic.anneal(cipher, [random.sample(range(count), count)], iterations, t_start, 0.1,
+                                   random.getrandbits(64), polish_rounds=10)
+    _, plain = digraphic.score(cipher, keys)
+    return final, "".join(symbols[s] for s in keys[0]), "".join(symbols[s] for s in plain)
 
 
 def solve_job(job):
@@ -176,17 +121,22 @@ def run():
     runs = int(runs) if runs.isdigit() and int(runs) > 0 else 4
     jobs = [{'ciphertext': text, 'period': p, 'kind': kind, 'iterations': steps, 'seed': random.randrange(2 ** 32)}
             for p in periods for _ in range(runs)]
-    workers = max(1, min(len(jobs), (os.cpu_count() or 2) - 1))
-    if not native.available():
-        print(f"{YELLOW}C engines not built (menu 45): decryption runs in Python, about 10x slower.{RESET}")
+    import compute
+    workers = compute.workers(len(jobs))
+    native.require()
     print(f"{GREY}{len(jobs)} runs on {workers} processes...{RESET}")
     started, results = time.time(), []
-    with ProcessPoolExecutor(max_workers=workers) as pool:
-        futures = [pool.submit(solve_job, job) for job in jobs]
-        for done, future in enumerate(as_completed(futures), start=1):
-            results.append(future.result())
-            best = max(results, key=lambda r: r[1])
-            print(f"  {done}/{len(jobs)} runs | best: period {best[0]}, fitness {best[1]:.1f}", end="\r")
+    try:
+        with ProcessPoolExecutor(max_workers=workers) as pool:
+            futures = [pool.submit(solve_job, job) for job in jobs]
+            for done, future in enumerate(as_completed(futures), start=1):
+                results.append(future.result())
+                best = max(results, key=lambda r: r[1])
+                print(f"  {done}/{len(jobs)} runs | best: period {best[0]}, fitness {best[1]:.1f}", end="\r")
+    except KeyboardInterrupt:
+        print(f"\n{YELLOW}Interrupted; showing the finished runs.{RESET}")
+    if not results:
+        return
     results.sort(key=lambda r: -r[1])
     refs = cp.references(len(cipher))
     print(f"\n{BOLD}Best results{RESET} {GREY}({time.time() - started:.0f} s){RESET}")

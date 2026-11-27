@@ -213,8 +213,8 @@ def show_pathways(p: cp.Profile, out: Report):
         out(f"\n  {BOLD}{index}. {pathway.title}{RESET}  {colour}[{pathway.strength}]{RESET}")
         for line in pathway.evidence:
             out(wrap(line, "       ", "     - "))
-        for number, what in pathway.tools:
-            out(wrap(what, "            ", f"     {YELLOW}{number:>3}{RESET}  "))
+        for reference, what in pathway.tools:
+            out(wrap(what, "            ", f"     {YELLOW}{str(menu_number(reference)):>3}{RESET}  "))
         if pathway.plan:
             out(f"     {CYAN}Hill-climb available here (menu option 3).{RESET}")
     if p.ruled_out:
@@ -288,15 +288,33 @@ def ask_int_range_text(text):
     return list(range(min(low, high), max(low, high) + 1))
 
 
+def within_engine_limits(combo):
+    """The C engine takes transposition widths up to MAX_WIDTH and periods up to MAX_PERIOD."""
+    from two_layer import MAX_PERIOD, MAX_WIDTH
+    for kind, parameter in combo:
+        if kind == "trans" and not 2 <= parameter[0] <= MAX_WIDTH:
+            return False
+        if kind == "periodic" and not 1 <= parameter[0] <= MAX_PERIOD:
+            return False
+    return True
+
+
 def run_plan(p: cp.Profile, plan: cp.AttackPlan):
     combos = plan.combos()
+    kept = [combo for combo in combos if within_engine_limits(combo)]
+    if len(kept) < len(combos):
+        from two_layer import MAX_PERIOD, MAX_WIDTH
+        print(f"{YELLOW}Skipped {len(combos) - len(kept)} combination(s) outside the C engine's limits "
+              f"(width 2-{MAX_WIDTH}, period 1-{MAX_PERIOD}).{RESET}")
+    combos = kept
     if not combos:
         print(f"{RED}No parameter combinations.{RESET}")
         return []
     jobs = [{'cipher': p.prepared.codes, 'encryption': combo, 'iterations': plan.steps,
              'ngram_path': NGRAM_PATH, 'entropy_weight': 0.5, 'seed': random.randrange(2 ** 32),
              'label': describe_combo(combo)} for combo in combos for _ in range(plan.runs)]
-    workers = max(1, min(len(jobs), (os.cpu_count() or 2) - 1))
+    import compute
+    workers = compute.workers(len(jobs))
     step = measure_step_time(jobs[0])
     estimate = step * plan.steps * len(jobs) / workers
     print(f"\n{BLUE}{len(jobs)} runs{RESET} ({len(combos)} combination(s) x {plan.runs}) of {plan.steps:,} steps on "
@@ -353,11 +371,32 @@ def show_climb_results(p: cp.Profile, results, out: Report):
 
 # ------------------------------------------------------------------ tools
 
-def open_tool(number, ciphertext):
+def _launcher():
     try:
-        launcher = importlib.import_module("main")
-        item = next(item for _, items in launcher.CATEGORIES for item in items if str(item[0]) == str(number))
-    except (ImportError, StopIteration, AttributeError):
+        return importlib.import_module("main")
+    except ImportError:
+        return None
+
+
+def menu_item(reference, legacy=None):
+    """The launcher's menu item for a pathway reference: a module name, or a
+    menu number. cipher_profile's pathways name modules; an int is read as a
+    pre-v2.1 number when legacy is True, or when legacy is None."""
+    launcher = _launcher()
+    if launcher is None or not hasattr(launcher, "resolve_tool"):
+        return None
+    return launcher.resolve_tool(reference, legacy_numbers=isinstance(reference, int) if legacy is None else legacy)
+
+
+def menu_number(reference):
+    item = menu_item(reference)
+    return item[0] if item else reference
+
+
+def open_tool(number, ciphertext):
+    """Open a launcher tool by its CURRENT menu number (as shown) or module name."""
+    item = menu_item(number, legacy=False)
+    if item is None:
         print(f"{RED}Tool {number} not found.{RESET}")
         return
     session.install_input_hook()
@@ -394,6 +433,9 @@ def analyze(raw):
         print(f"{RED}Need at least {cp.MIN_LETTERS} letters (or symbol groups) to analyze.{RESET}")
         return None, None
     session.set_ciphertext(raw)
+    # The main menu marks these tools (•) and N steps through them, best first.
+    session.set_suggestions([(ref, what) for pathway in p.pathways if pathway.strength != "long shot"
+                             for ref, what in pathway.tools])
     out = Report()
     show_statistics(p, out)
     show_pathways(p, out)
@@ -430,7 +472,7 @@ def run():
             rule()
             option(1, "Analyze a new ciphertext")
             option(2, "Make a blind test ciphertext", "(random cipher, hidden until you reveal it)")
-            option(3, "Hill-climb a pathway", "(annealing with the Two-Layer engine, uses every CPU core)")
+            option(3, "Hill-climb a pathway", "(C annealing in parallel runs; workers set in 92 Compute)")
             option(4, "Open a recommended tool", "(by menu number)")
             option(5, "Show the analysis again")
             option(6, "Save the report to a file")
@@ -465,7 +507,7 @@ def run():
                 results = run_plan(p, plan)
                 show_climb_results(p, results, out)
         elif choice == "4" and p is not None:
-            numbers = list(dict.fromkeys(number for pathway in p.pathways for number, _ in pathway.tools))
+            numbers = list(dict.fromkeys(menu_number(ref) for pathway in p.pathways for ref, _ in pathway.tools))
             print(f"{GREY}Recommended, in order: {', '.join(map(str, numbers))}{RESET}")
             number = input("Tool number: ").strip()
             if number:

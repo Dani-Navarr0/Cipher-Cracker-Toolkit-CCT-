@@ -1,13 +1,17 @@
-"""Multi-layer cipher model: each layer is one classical cipher with a key that
-annealing can modify, and a stack of layers is decrypted in sequence.
+"""Multi-layer cipher model: each layer is one classical cipher with a key, and
+a stack of layers is decrypted in sequence. The search over the keys (joint
+simulated annealing and the final hill climb) runs in C
+(native/layered_engine.c); the layer classes here hold the keys and decrypt
+once (encryption in tests and test-cipher makers, display).
 
 Layers operate on bytes of letter codes 0-25. A stack is given in DECRYPTION
 order: ``layers[0]`` is applied to the ciphertext first (it is the layer that
 was applied LAST during encryption).
 """
 import random
+import time
 
-from annealing import Fitness, Schedule, anneal, hill_climb
+from annealing import Fitness, Schedule
 from transposition_core import make_permuter
 
 ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
@@ -22,22 +26,19 @@ TRANSPOSITION_MODES = {
     'write_cols_read_rows': 'Write Columns, Read Rows',
     'write_cols_read_cols': 'Write Columns, Read Columns',
 }
+# Annealing steps per C call: Ctrl+C and progress reports are handled between calls.
+CHUNK_STEPS = 100_000
 
 
 class SubstitutionLayer:
     """Simple (monoalphabetic) substitution. ``table[c]`` = plaintext of cipher letter c."""
     name = "Substitution"
+    kind = "sub"
     preserves_counts = True
 
     def __init__(self):
         self.table = bytearray(range(256))
-        self.present = list(range(26))
         self.randomize()
-
-    def prepare(self, source):
-        """Restrict moves to cipher letters that actually occur in this layer's input."""
-        present = sorted(set(source))
-        self.present = present if len(present) >= 2 else list(range(26))
 
     def randomize(self):
         self.table[:26] = bytes(random.sample(range(26), 26))
@@ -52,33 +53,18 @@ class SubstitutionLayer:
     def decrypt(self, source):
         return source.translate(self.table)
 
-    def move(self):
-        a = random.choice(self.present)
-        b = random.randrange(25)
-        b += b >= a
-        table = self.table
-        table[a], table[b] = table[b], table[a]
-        self._last = (a, b)
+    def spec(self):
+        """(kind, key length, variant, layout) for the C engine."""
+        return ("sub", 26, None, None)
 
-    def undo(self):
-        a, b = self._last
-        table = self.table
-        table[a], table[b] = table[b], table[a]
-
-    def all_moves(self):
-        return [(a, b) for a in self.present for b in range(26) if b != a and (b not in self.present or b > a)]
-
-    def apply(self, move):
-        a, b = move
-        table = self.table
-        table[a], table[b] = table[b], table[a]
-        self._last = move
+    def key_codes(self):
+        return list(self.table[:26])
 
     def snapshot(self):
         return bytes(self.table[:26])
 
     def restore(self, snapshot):
-        self.table[:26] = snapshot
+        self.table[:26] = bytes(snapshot)
 
     @staticmethod
     def describe(snapshot):
@@ -90,6 +76,7 @@ class SubstitutionLayer:
 
 class TranspositionLayer:
     """Columnar-style transposition of a fixed width in one of four layouts."""
+    kind = "trans"
     preserves_counts = True
 
     def __init__(self, length: int, width: int, mode: str):
@@ -100,9 +87,6 @@ class TranspositionLayer:
         self.key = list(range(width))
         self.randomize()
 
-    def prepare(self, source):
-        pass
-
     def randomize(self):
         random.shuffle(self.key)
 
@@ -112,36 +96,11 @@ class TranspositionLayer:
     def decrypt(self, source):
         return self.permute(source, self.key)
 
-    def move(self):
-        key = self.key
-        self._last = key[:]
-        width = self.width
-        roll = random.random()
-        i, j = random.sample(range(width), 2)
-        if roll < 0.6:      # swap two columns
-            key[i], key[j] = key[j], key[i]
-        elif roll < 0.8:    # reverse a block of columns
-            if i > j:
-                i, j = j, i
-            key[i:j + 1] = key[i:j + 1][::-1]
-        else:               # move one column to another position
-            key.insert(j, key.pop(i))
+    def spec(self):
+        return ("trans", self.width, None, self.mode)
 
-    def undo(self):
-        self.key[:] = self._last
-
-    def all_moves(self):
-        swaps = [("swap", i, j) for i in range(self.width) for j in range(i + 1, self.width)]
-        shifts = [("move", i, j) for i in range(self.width) for j in range(self.width) if abs(i - j) > 1]
-        return swaps + shifts
-
-    def apply(self, move):
-        kind, i, j = move
-        self._last = self.key[:]
-        if kind == "swap":
-            self.key[i], self.key[j] = self.key[j], self.key[i]
-        else:
-            self.key.insert(j, self.key.pop(i))
+    def key_codes(self):
+        return list(self.key)
 
     def snapshot(self):
         return tuple(self.key)
@@ -156,6 +115,7 @@ class TranspositionLayer:
 
 class PeriodicLayer:
     """Periodic polyalphabetic layer (Vigenere, Beaufort, Variant Beaufort)."""
+    kind = "periodic"
     preserves_counts = False
     VARIANTS = {
         'vigenere': lambda c, k: (c - k) % 26,
@@ -171,9 +131,6 @@ class PeriodicLayer:
         self.tables = [bytes(rule(c, k) for c in range(26)) + bytes(230) for k in range(26)]
         self.key = [0] * period
         self.randomize()
-
-    def prepare(self, source):
-        pass
 
     def randomize(self):
         self.key = [random.randrange(26) for _ in range(self.period)]
@@ -205,24 +162,11 @@ class PeriodicLayer:
             output[column::period] = source[column::period].translate(tables[key[column]])
         return output
 
-    def move(self):
-        column = random.randrange(self.period)
-        old = self.key[column]
-        new = random.randrange(25)
-        self.key[column] = new + (new >= old)
-        self._last = (column, old)
+    def spec(self):
+        return ("periodic", self.period, self.variant, None)
 
-    def undo(self):
-        column, old = self._last
-        self.key[column] = old
-
-    def all_moves(self):
-        return [(column, shift) for column in range(self.period) for shift in range(26)]
-
-    def apply(self, move):
-        column, shift = move
-        self._last = (column, self.key[column])
-        self.key[column] = shift
+    def key_codes(self):
+        return list(self.key)
 
     def snapshot(self):
         return tuple(self.key)
@@ -237,85 +181,90 @@ class PeriodicLayer:
 class LayeredSolver:
     """Joint annealing over every layer's key, scoring the fully decrypted text.
 
-    Intermediate results are cached per layer, so a move in a later layer (in
-    decryption order) only re-runs that layer and the ones after it.
+    The search runs in C (native/layered_engine.c; 1-4 layers, transposition
+    width <= 64, period <= 128). The layers' current keys are the starting
+    point (random from the constructors, or set with seed()); after anneal(),
+    polish() and restore() the keys found are written back to the layer objects.
+    Raises native.NativeUnavailable when the C library is not built.
     """
 
-    def __init__(self, cipher_codes: bytes, layers, fitness: Fitness, weights=None):
+    def __init__(self, cipher_codes: bytes, layers, fitness: Fitness, weights=None, seed=None):
+        from native.layered_engine import Stack
         self.cipher = bytes(cipher_codes)
         self.layers = layers
         self.fitness = fitness
-        weights = weights or [1.0] * len(layers)
-        total = sum(weights)
-        cumulative, running = [], 0.0
-        for weight in weights:
-            running += weight / total
-            cumulative.append(running)
-        self.cumulative = cumulative
-        self.outputs = [None] * len(layers)
-        self._recompute(0)
+        self.stack = Stack(self.cipher, [layer.spec() for layer in layers], weights or [1.0] * len(layers),
+                           fitness.scores, fitness.size, fitness.entropy_weight, fitness.fixed_factor,
+                           random.getrandbits(64) if seed is None else seed)
         for index, layer in enumerate(layers):
-            layer.prepare(self.cipher if index == 0 else self.outputs[index - 1])
-        self.current = self.fitness(self.outputs[-1])
-
-    def _recompute(self, start):
-        text = self.cipher if start == 0 else self.outputs[start - 1]
-        for index in range(start, len(self.layers)):
-            text = self.layers[index].decrypt(text)
-            self.outputs[index] = text
-        return text
+            self.stack.set_key(index, layer.key_codes())
 
     def plaintext(self) -> bytes:
-        return bytes(self.outputs[-1])
+        return self.stack.plaintext()
 
     def score(self) -> float:
-        return self.fitness(self.outputs[-1])
-
-    def _choose_layer(self):
-        roll = random.random()
-        for index, bound in enumerate(self.cumulative):
-            if roll < bound:
-                return index
-        return len(self.layers) - 1
+        return self.stack.score()
 
     def propose(self) -> float:
-        index = self._choose_layer()
-        self._saved = (index, self.outputs[index:])
-        self.layers[index].move()
-        return self.fitness(self._recompute(index))
+        """One random move in C (a layer chosen by weight); undo() reverts it."""
+        return self.stack.propose()
 
     def undo(self):
-        index, saved = self._saved
-        self.layers[index].undo()
-        self.outputs[index:] = saved
+        self.stack.undo()
+
+    def _layer_snapshot(self, index, best=False):
+        key = self.stack.get_key(index, best)
+        return bytes(key) if self.layers[index].kind == "sub" else tuple(key)
 
     def snapshot(self):
-        return tuple(layer.snapshot() for layer in self.layers)
+        return tuple(self._layer_snapshot(index) for index in range(len(self.layers)))
 
     def restore(self, snapshot):
-        for layer, state in zip(self.layers, snapshot):
-            layer.restore(state)
-        self._recompute(0)
+        for index, state in enumerate(snapshot):
+            self.stack.set_key(index, list(state))
+        self._sync()
 
-    def anneal(self, schedule: Schedule, report=None):
-        best_state, best_score = anneal(self.score(), self.propose, self.undo, self.snapshot, schedule, report)
-        self.restore(best_state)
-        return best_score
+    def _sync(self):
+        """Write the C engine's current keys back to the layer objects."""
+        for index, layer in enumerate(self.layers):
+            layer.restore(self._layer_snapshot(index))
+
+    def anneal(self, schedule: Schedule, report=None, report_seconds: float = 0.5):
+        """Simulated annealing in C, CHUNK_STEPS steps per call. ``report(step,
+        temperature, best score, best state)`` is called about every
+        report_seconds. Ctrl+C stops early and keeps the best so far. Leaves the
+        best state current and returns its score."""
+        stack = self.stack
+        stack.schedule(schedule.iterations, schedule.t_start, schedule.t_end)
+        next_report = time.time() + report_seconds
+        try:
+            while stack.anneal(CHUNK_STEPS):
+                if report is not None and time.time() >= next_report:
+                    step, _, best, temperature = stack.status()
+                    report(step, temperature, best,
+                           tuple(self._layer_snapshot(i, best=True) for i in range(len(self.layers))))
+                    next_report = time.time() + report_seconds
+        except KeyboardInterrupt:
+            print("\nPass interrupted; keeping the best result so far.")
+        score = stack.restore_best()
+        self._sync()
+        return score
 
     def polish(self, max_rounds: int = 20) -> float:
-        """Hill-climb every single move of every layer until nothing improves."""
-        score = self.score()
-        for _ in range(max_rounds):
-            before = score
-            for index, layer in enumerate(self.layers):
-                def apply_move(move, index=index, layer=layer):
-                    self._saved = (index, self.outputs[index:])
-                    layer.apply(move)
-                    return self.fitness(self._recompute(index))
-                score = hill_climb(score, layer.all_moves(), apply_move, self.undo, max_rounds=1)
-            if score <= before + 1e-12:
-                break
+        """Hill-climb every single move of every layer (in C) until nothing improves."""
+        score = self.stack.polish(max_rounds)
+        self._sync()
         return score
+
+    def seconds_per_step(self, steps: int = 20_000) -> float:
+        """Measured time of one annealing step on this machine (keys are restored after)."""
+        saved = self.snapshot()
+        self.stack.schedule(steps, 20.0, 0.1)
+        started = time.perf_counter()
+        self.stack.anneal(steps)
+        elapsed = time.perf_counter() - started
+        self.restore(saved)
+        return elapsed / max(1, steps)
 
     def describe(self, snapshot=None):
         snapshot = snapshot or self.snapshot()

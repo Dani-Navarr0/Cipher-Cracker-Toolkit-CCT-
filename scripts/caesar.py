@@ -91,22 +91,6 @@ def brute_force_caesar(ciphertext, alphabet):
     
     return results
 
-def save_caesar_results(filename, results):
-    """Saves the full list of brute-force results to a text file."""
-    try:
-        with open(filename, 'w', encoding='utf-8') as f:
-            f.write("Caesar Cipher Brute-Force Results\n")
-            f.write("===================================\n\n")
-            for result in results:
-                f.write(f"Shift: {result['shift']}\n")
-                f.write(f"IoC Score: {result['ioc']:.4f}\n")
-                f.write(f"N-gram Score: {result['bigram_score']:.2f}\n")
-                f.write(f"Plaintext: {result['text']}\n")
-                f.write("-" * 20 + "\n")
-        print(f"{GREEN}Results successfully saved to {filename}{RESET}")
-    except IOError as e:
-        print(f"{RED}Error: Could not save file. {e}{RESET}")
-
 # --- MAIN APPLICATION ---
 
 def run():

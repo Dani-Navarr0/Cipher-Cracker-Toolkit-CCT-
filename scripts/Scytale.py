@@ -1,8 +1,7 @@
 import os
 import math
-from functools import lru_cache
 from typing import List, Dict
-from ngram_scoring import DEFAULT_NGRAM_PATH, load_ngram_scores, score_text
+from ngram_scoring import DEFAULT_NGRAM_PATH, load_ngram_scores
 
 # --- DUMMY UTILS CLASS (to make script standalone) ---
 class DummyUtils:
@@ -40,13 +39,6 @@ def calculate_ioc(text: str) -> float:
     numerator = sum(count * (count - 1) for count in freqs.values())
     denominator = n * (n - 1)
     return numerator / denominator if denominator > 0 else 0.0
-
-@lru_cache(maxsize=None)
-def load_bigram_frequencies(file_path: str) -> Dict[str, float]:
-    return load_ngram_scores(file_path)
-
-def calculate_bigram_score(text: str, expected_freqs: Dict[str, float]) -> float:
-    return score_text(text, expected_freqs)
 
 # --- SCYTALE CORE FUNCTIONS ---
 
@@ -91,39 +83,43 @@ def decrypt_scytale(ciphertext: str, sides: int) -> str:
 
 def brute_force_scytale(ciphertext: str):
     """
-    Tries all possible numbers of sides for the Scytale and ranks the results.
+    Tries all possible numbers of sides (2..len-1) for the Scytale and ranks the
+    results (C engine: every reading generated and scored in native code).
+    Every side count gives a distinct reading (sides above len/2 are NOT
+    redundant: they produce different short final columns). A reading is the
+    grid route 'columns_down' read back, i.e. transposition_core's
+    write_rows_read_cols layout with the identity column order (tested).
+    'bigram_score' is ngram_scoring.score_text's cost, 255 - mean n-gram score
+    over the letters (lower is better); the IoC is the same for every reading.
     """
-    print(f"\n{GREY}Loading bigram frequency data...{RESET}")
-    expected_freqs = load_bigram_frequencies(ngram_path)
-    if not expected_freqs:
-        print(f"{RED}Warning: Bigram frequency file not found. Scoring will be less accurate.{RESET}")
-
-    results = []
-    # Every side count from 2 to len-1 gives a distinct reading (sides above
-    # len/2 are NOT redundant: they produce different short final columns).
-    max_sides = len(ciphertext) - 1
-    
-    print(f"{GREY}Brute forcing {max_sides - 1} possible key diameters...{RESET}")
-
-    for sides in range(2, max_sides + 1):
-        plaintext = decrypt_scytale(ciphertext, sides)
-        if not plaintext:
-            continue
-            
-        ioc = calculate_ioc(plaintext)
-        bigram_score = calculate_bigram_score(plaintext, expected_freqs)
-        
-        results.append({
-            'key': sides,
-            'plaintext': plaintext,
-            'ioc': ioc,
-            'bigram_score': bigram_score
-        })
-    
-    # Sort results: primary key is bigram_score (lower is better), secondary is IoC (higher is better)
+    import native
+    from native.screens import COLUMNAR, FORWARD, LAYOUTS, Sources, record_of, symbol_codes
+    native.require()
+    model = load_ngram_scores(str(ngram_path))
+    codes, shown, decode = symbol_codes(ciphertext)
+    n = len(codes)
+    sources = Sources(n)
+    for sides in range(2, n):
+        sources.add(COLUMNAR, (sides, LAYOUTS["write_rows_read_cols"]), meta=("scytale", sides))
+    print(f"{GREY}Brute forcing {max(0, n - 2)} possible key diameters...{RESET}")
+    # factor 1: the C score is the mean n-gram score itself (score_text's measure)
+    _, scored = sources.score(codes, _MeanScore(model), text=FORWARD)
+    plains = sources.plain(shown, [ident for _, ident in scored])
+    ioc = calculate_ioc(ciphertext)
+    results = [{'key': sources.meta[record_of(ident)][1],
+                'plaintext': decode(plain), 'ioc': ioc,
+                'bigram_score': float("inf") if mean == -9999.0 else 255 - mean}
+               for (mean, ident), plain in zip(scored, plains)]
+    # lower cost first; ties keep the side-count order (the IoC is constant)
     results.sort(key=lambda x: (x['bigram_score'], -x['ioc']))
-    
     return results
+
+
+class _MeanScore:
+    """Fitness parameters for the C screen with factor 1 (mean n-gram score)."""
+
+    def __init__(self, model):
+        self.scores, self.size, self.entropy_weight, self.fixed_factor = model.scores, model.size, 0.0, 1.0
 
 # --- MAIN APPLICATION ---
 

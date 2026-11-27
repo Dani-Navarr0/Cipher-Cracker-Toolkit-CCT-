@@ -1,27 +1,47 @@
 """Shared machinery for keyword dictionary attacks (Vigenere, Beaufort, Porta).
 
-Each cipher module supplies only its ``decrypt(ciphertext, key, alphabet)``
-function; candidate generation, scoring, filtering and parallelism live here.
+Each cipher module registers its ``decrypt(ciphertext, key, alphabet)`` with
+its rule (``register_kernel``); run_batches then decrypts and scores every
+word in C (scripts/native/periodic_dict.c, cct_periodic_dict) on several
+threads, and Python only renders the rows that are kept.
+
+What is scored is exactly what the Python decrypt returns: characters whose
+upper case is in the alphabet are decrypted (the key advances on them) and
+come out in lower case; every other character passes through in lower case.
+Cost = ngram_scoring.score_text of that text (255 - mean n-gram score, lower
+is more English-like), IoC = utils.calculate_ioc of it.
+
+Any alphabet of 1 to 256 characters works (A-Z, keyed, I/J-merged, with
+digits); the C kernel scores each plaintext symbol by the text it is shown as.
 """
-import heapq
 import os
 import time
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import lru_cache
 
-from ngram_scoring import score_text
+import compute
 from theme import RED, RESET, YELLOW
+from ngram_scoring import score_text
 from utils.utils import calculate_ioc
 
-# Starting a process pool on Windows (spawn) re-imports the launcher and every
-# module in each worker, which costs seconds. Below this many words a single
-# process finishes first (decrypt + score is roughly 50-100 us per word).
-PARALLEL_THRESHOLD = 30_000
+from native import periodic_engine
+
 BATCH_SIZE = 2_000
 # Candidates kept per batch purely on n-gram score, in addition to phrase and
 # IoC-window matches. English text frequently falls outside a narrow IoC
 # window, so filtering on IoC alone can discard the correct key.
 TOP_PER_BATCH = 25
+MAX_ALPHABET = 256
+_KERNELS = {}
+
+
+def register_kernel(decrypt, rule):
+    """Declare that ``decrypt(ciphertext, key, alphabet)`` is a periodic cipher
+    with the Vigenere-family text rules described above and plaintext index
+    ``rule(cipher_index, key_index, m)`` (alphabet indices, m = alphabet
+    length), so run_batches can run it in C."""
+    _KERNELS[decrypt] = rule
+    return decrypt
 
 
 @lru_cache(maxsize=4)
@@ -29,6 +49,22 @@ def read_word_list(file_path: str) -> tuple:
     """Read a word list once per process: stripped, uppercased, de-duplicated."""
     with open(file_path, "r", encoding="utf-8") as word_file:
         return tuple(dict.fromkeys(line.strip().upper() for line in word_file if line.strip()))
+
+
+def read_ascii_keys(file_path: str):
+    """The XOR and modular word-list attacks' keys: every non-empty stripped
+    line that is pure ASCII, upper-cased, in file order (no de-duplication),
+    as (list of words, periodic_engine.KeyList of their bytes). Cached per
+    file and modification time."""
+    return _read_ascii_keys(str(file_path), os.path.getmtime(file_path))
+
+
+@lru_cache(maxsize=2)
+def _read_ascii_keys(file_path, mtime):
+    with open(file_path, "r", encoding="utf-8") as word_file:
+        lines = word_file.read().splitlines()
+    words = [word.upper() for word in map(str.strip, lines) if word and word.isascii()]
+    return words, periodic_engine.KeyList.joined("".join(words).encode("ascii"), map(len, words))
 
 
 def load_dictionary(file_path, alphabet_str, min_length=3, max_length=15, allowed_lengths=None):
@@ -63,49 +99,130 @@ def make_result(key, plaintext, ngram_model, phrases, is_phrase_match=None, ioc=
     }
 
 
-def score_batch(args):
-    """Decrypt and score one batch of keys. Must stay module-level (pickled)."""
-    decrypt, words, ciphertext, alphabet_str, phrases, ngram_model, min_ioc, max_ioc = args
-    kept, others = [], []
-    for word in words:
-        plaintext = decrypt(ciphertext, word, alphabet_str)
-        score = score_text(plaintext, ngram_model)
-        ioc = calculate_ioc(plaintext)
-        is_phrase_match = contains_all_phrases(plaintext, phrases)
-        entry = (score, word, plaintext, ioc, is_phrase_match)
-        if is_phrase_match or min_ioc <= ioc <= max_ioc:
-            kept.append(entry)
+class _Prepared:
+    """The ciphertext split for the C kernel, plus a fast renderer for kept rows."""
+
+    def __init__(self, ciphertext, alphabet, rule, phrases, ngram_model):
+        self.alphabet = alphabet
+        m = len(alphabet)
+        self.index_of = {char: i for i, char in enumerate(alphabet)}
+        pieces, self.segments, run = [], [], 0
+        for char in ciphertext:
+            index = self.index_of.get(char.upper())
+            if index is not None:
+                pieces.append(index)
+                run += 1
+            else:
+                pieces.append(char.lower())
+                self.segments.append((run, char.lower()))
+                run = 0
+        self.tail = run
+        self.symbols = bytes(piece for piece in pieces if isinstance(piece, int))
+        rows = [bytes(rule(c, k, m) for c in range(m)) for k in range(m)]
+        self.tables = [row + bytes(256 - m) for row in rows]          # 256-byte translate tables
+        self.shown = [char.lower() for char in alphabet]                # what each plaintext symbol is shown as
+        self.lower = None
+        if all(len(text) == 1 and text.isascii() for text in self.shown):
+            self.lower = bytes.maketrans(bytes(range(m)), "".join(self.shown).encode("ascii"))
+        self.context = periodic_engine.TextContext(
+            pieces, b"".join(rows), m, self.shown, ngram_model,
+            phrases=[phrase.upper().replace(" ", "") for phrase in phrases], phrase_all=True,
+            phrase_view=lambda text: text.upper().replace(" ", ""))
+
+    def key_bytes(self, word):
+        return bytes(self.index_of[char] for char in word.upper() if char in self.index_of)
+
+    def render(self, key):
+        """The decrypt function's output for this key (lower case, other characters kept)."""
+        plain = bytearray(len(self.symbols))
+        for column, k in enumerate(key):
+            plain[column::len(key)] = self.symbols[column::len(key)].translate(self.tables[k])
+        if self.lower is not None:
+            letters = plain.translate(self.lower).decode("ascii")
+            ends = None
         else:
-            others.append(entry)
-    kept.extend(heapq.nsmallest(TOP_PER_BATCH, others, key=lambda entry: entry[0]))
-    return [
-        make_result(word, plaintext, ngram_model, phrases, is_phrase_match, ioc, score)
-        for score, word, plaintext, ioc, is_phrase_match in kept
-    ]
+            shown = [self.shown[p] for p in plain]
+            letters = "".join(shown)
+            ends = [0]
+            for text in shown:
+                ends.append(ends[-1] + len(text))
+        if not self.segments:
+            return letters
+        parts, position = [], 0
+        for run, char in self.segments:
+            stop = position + run
+            parts.append(letters[position:stop] if ends is None else letters[ends[position]:ends[stop]])
+            parts.append(char)
+            position = stop
+        parts.append(letters[position:] if ends is None else letters[ends[position]:])
+        return "".join(parts)
+
+
+def _word_keys(words, prepared):
+    """KeyList of the words' key indices; words with no alphabet letters get an
+    empty key (the kernel skips them: the decrypt would return the text unchanged)."""
+    joined = "".join(words).upper()
+    alphabet = prepared.alphabet
+    if alphabet.isascii() and joined.isascii() and sum(map(len, words)) == len(joined):
+        alphabet_bytes = alphabet.encode("ascii")
+        if not joined.encode("ascii").translate(None, alphabet_bytes):
+            # bytes.maketrans keeps the last mapping of a repeated character, as {char: index} does
+            translate = bytes.maketrans(alphabet_bytes, bytes(range(len(alphabet))))
+            return periodic_engine.KeyList.joined(joined.encode("ascii").translate(translate), map(len, words))
+    return periodic_engine.KeyList([prepared.key_bytes(word) for word in words])
 
 
 def run_batches(decrypt, words, ciphertext, alphabet_str, phrases, ngram_model, min_ioc, max_ioc):
-    """Score every word as a key, in parallel only when that pays off."""
-    batches = [words[index:index + BATCH_SIZE] for index in range(0, len(words), BATCH_SIZE)]
-    tasks = [(decrypt, batch, ciphertext, alphabet_str, phrases, ngram_model, min_ioc, max_ioc) for batch in batches]
-    workers = max(1, (os.cpu_count() or 1) - 1)
-    parallel = len(words) >= PARALLEL_THRESHOLD and workers > 1
-    print(f"Processing {YELLOW}{len(words):,}{RESET} words with "
-          f"{YELLOW}{workers if parallel else 1}{RESET} process(es)...")
+    """Score every word as a key (in C, on several threads). Per batch of
+    BATCH_SIZE words, keeps phrase matches and IoC-window hits plus the
+    TOP_PER_BATCH best others by n-gram cost. Returns result dicts (make_result)."""
+    rule = _KERNELS.get(decrypt)
+    if rule is None:
+        raise ValueError(f"{getattr(decrypt, '__name__', decrypt)} has no C dictionary kernel; "
+                         "register it with attack_support.register_kernel(decrypt, rule)")
+    alphabet = alphabet_str.upper()
+    if not 1 <= len(alphabet) <= MAX_ALPHABET:
+        print(f"{RED}The dictionary attack needs an alphabet of 1 to {MAX_ALPHABET} characters.{RESET}")
+        return []
+    prepared = _Prepared(ciphertext, alphabet, rule, list(phrases or []), ngram_model)
+    keys = _word_keys(words, prepared)
+    batches = [(start, min(BATCH_SIZE, len(words) - start)) for start in range(0, len(words), BATCH_SIZE)]
+    print(f"Processing {YELLOW}{len(words):,}{RESET} words with {YELLOW}{compute.workers(len(batches) or 1)}{RESET} "
+          f"thread(s) (C engine)...")
     start_time = time.time()
+    rows_by_batch = parallel_chunks(
+        lambda batch: periodic_engine.dictionary_batch(prepared.context, keys, batch[0], batch[1], min_ioc, max_ioc,
+                                                       TOP_PER_BATCH),
+        batches, lambda done, total: print(f"Progress: {done / total:.1%}", end='\r') if total > 1 else None)
     results = []
-    if parallel:
-        with ProcessPoolExecutor(max_workers=workers) as executor:
-            futures = [executor.submit(score_batch, task) for task in tasks]
-            for done, future in enumerate(as_completed(futures), start=1):
-                results.extend(future.result())
-                print(f"Progress: {done / len(futures):.1%}", end='\r')
-    else:
-        for done, task in enumerate(tasks, start=1):
-            results.extend(score_batch(task))
-            if len(tasks) > 1:
-                print(f"Progress: {done / len(tasks):.1%}", end='\r')
+    for rows in rows_by_batch:
+        for index, cost, ioc, phrase in rows or ():
+            word = words[index]
+            plaintext = prepared.render(keys.key(index))
+            results.append(make_result(word, plaintext, ngram_model, phrases, phrase, ioc, cost))
     print(f"\nDictionary search complete in {time.time() - start_time:.2f} seconds.")
+    return results
+
+
+def parallel_chunks(function, chunks, progress=None):
+    """function(chunk) for every chunk on compute.workers() threads (the C
+    engines release the GIL). Returns the results in chunk order; a chunk
+    not finished when Ctrl+C is pressed gives None. progress(done, total) is
+    called as chunks finish."""
+    if not chunks:
+        return []
+    results = [None] * len(chunks)
+    executor = ThreadPoolExecutor(max_workers=compute.workers(len(chunks)))
+    futures = {executor.submit(function, chunk): number for number, chunk in enumerate(chunks)}
+    try:
+        for done, future in enumerate(as_completed(futures), start=1):
+            results[futures[future]] = future.result()
+            if progress is not None:
+                progress(done, len(chunks))
+    except KeyboardInterrupt:
+        print(f"\n{YELLOW}Interrupted; keeping the parts finished so far.{RESET}")
+    finally:
+        executor.shutdown(wait=True, cancel_futures=True)
     return results
 
 

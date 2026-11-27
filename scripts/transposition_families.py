@@ -10,8 +10,17 @@ route, read row by row), because which convention was used is unknown.
 Families: grid routes (rows, columns, snakes, diagonals, spirals; any width;
 optionally starting part-way into the first row), rail fence, redefence,
 K3-style double rotation, Myszkowski and AMSCO.
+
+The *_order functions build ONE reading order (one-shot: planting test
+ciphertexts, describing a result). The *_sources enumerators return a
+native.screens.Sources: the C engine (screens_transposition.c) generates and
+scores every permutation; iterating it yields the (info, src) pairs, generated
+in C, in the order documented here. tests/test_c_screens.py checks the C
+generators against these order functions.
 """
 from itertools import permutations, product
+
+from native.screens import DOUBLE_ROTATION, ROUTE, ZIGZAG, Sources
 
 
 def _cells(length, width, offset=0):
@@ -70,10 +79,11 @@ def both_directions(order):
 
 
 def route_sources(length, widths=range(2, 49)):
+    """Every route of route_orders for each width, both directions (C-generated)."""
+    sources = Sources(length)
     for width in widths:
-        for name, order in route_orders(length, width).items():
-            for direction, src in both_directions(order).items():
-                yield {"transposition": "route", "route": name, "width": width, "direction": direction}, src
+        sources.add(ROUTE, (width, 0), key=[0], meta=("route", width, [0]))
+    return sources
 
 
 def rail_fence_order(length, rails):
@@ -83,9 +93,10 @@ def rail_fence_order(length, rails):
 
 
 def rail_fence_sources(length, rails_range=range(2, 49)):
+    sources = Sources(length)
     for rails in rails_range:
-        for direction, src in both_directions(rail_fence_order(length, rails)).items():
-            yield {"transposition": "rail_fence", "rails": rails, "direction": direction}, src
+        sources.add(ZIGZAG, (rails, 0), meta=("rail_fence", rails))
+    return sources
 
 
 def rotation_order(length, width, clockwise):
@@ -103,15 +114,13 @@ def compose(first, second):
 
 
 def double_rotation_sources(length, widths=range(2, 25)):
+    """compose(s1, s2) of two rotation steps, the same direction for both steps."""
+    sources = Sources(length)
     for w1, w2 in product(widths, repeat=2):
         for cw1, cw2 in product((True, False), repeat=2):
-            o1, o2 = rotation_order(length, w1, cw1), rotation_order(length, w2, cw2)
-            for d1, s1 in both_directions(o1).items():
-                for d2, s2 in both_directions(o2).items():
-                    if d1 != d2:
-                        continue  # same convention for both steps
-                    yield ({"transposition": "double_rotation", "widths": [w1, w2],
-                            "clockwise": [cw1, cw2], "direction": d1}, compose(s1, s2))
+            sources.add(DOUBLE_ROTATION, (w1, 0, w2, int(cw1) | int(cw2) << 1),
+                        meta=("double_rotation", w1, w2, cw1, cw2))
+    return sources
 
 
 # ------------------------------------------------------------------ sculpture geometry (hypothesis 2)
@@ -128,52 +137,27 @@ SCULPTURE_WIDTH, SCULPTURE_OFFSET = 31, 27
 
 def offset_grid_sources(length, widths=range(2, 49), offsets=None):
     """Routes through a grid in which the text starts ``offset`` cells into the
-    first row; both directions. Duplicate permutations within a width are dropped."""
+    first row; both directions. Duplicate permutations within a width are dropped
+    (in C)."""
+    sources = Sources(length)
     for width in widths:
-        seen = set()
-        for offset in (offsets if offsets is not None else range(1, width)):
-            for name, order in route_orders(length, width, offset).items():
-                for direction, src in both_directions(order).items():
-                    key = tuple(src)
-                    if key in seen:
-                        continue
-                    seen.add(key)
-                    yield ({"transposition": "offset_grid", "route": name, "width": width, "grid_offset": offset,
-                            "direction": direction}, src)
+        chosen = list(offsets if offsets is not None else range(1, width))
+        if chosen:
+            sources.add(ROUTE, (width, 1), key=chosen, meta=("offset_grid", width, chosen))
+    return sources
 
 
 def offset_double_rotation_sources(length, first_width, offsets=None, widths2=range(2, 25)):
     """K3-style double rotation whose FIRST grid starts ``offset`` cells in
     (the text continuing a previous one); the second grid is a fresh one."""
+    sources = Sources(length)
     for offset in (offsets if offsets is not None else range(1, first_width)):
-        routes = route_orders(length, first_width, offset)
         for cw1 in (True, False):
-            o1 = routes["columns_up"] if cw1 else routes["columns_right_to_left_down"]
             for w2 in widths2:
                 for cw2 in (True, False):
-                    o2 = rotation_order(length, w2, cw2)
-                    for d, s1 in both_directions(o1).items():
-                        s2 = both_directions(o2)[d]
-                        yield ({"transposition": "offset_double_rotation", "widths": [first_width, w2],
-                                "grid_offset": offset, "clockwise": [cw1, cw2], "direction": d}, compose(s1, s2))
-
-
-def segment_sources(segments, allow_reverse=True, first=None):
-    """Reorder (and optionally reverse) W-delimited segments.
-    ``segments`` are (start, length) in the ciphertext; yields src over the
-    concatenation of all segment letters."""
-    count = len(segments)
-    for order in permutations(range(count)):
-        if first is not None and order[0] != first:
-            continue
-        for flips in (product((False, True), repeat=count) if allow_reverse else [(False,) * count]):
-            src = []
-            for index in order:
-                start, size = segments[index]
-                positions = list(range(start, start + size))
-                src.extend(reversed(positions) if flips[index] else positions)
-            yield {"transposition": "w_segments", "segment_order": list(order),
-                   "reversed": [i for i in range(count) if flips[i]]}, src
+                    sources.add(DOUBLE_ROTATION, (first_width, offset, w2, int(cw1) | int(cw2) << 1),
+                                meta=("offset_double_rotation", first_width, w2, cw1, cw2, offset))
+    return sources
 
 
 # ------------------------------------------------------------------ other classic (ACA) transpositions
@@ -235,11 +219,10 @@ def redefence_order(length, rail_order):
 
 
 def redefence_sources(length, rails_range=range(3, 9)):
-    from itertools import permutations
+    sources = Sources(length)
     for rails in rails_range:
         for rail_order in permutations(range(rails)):
             if list(rail_order) == sorted(rail_order):
                 continue      # the plain rail fence (already searched)
-            for direction, src in both_directions(redefence_order(length, rail_order)).items():
-                yield {"transposition": "redefence", "rails": rails, "rail_order": list(rail_order),
-                       "direction": direction}, src
+            sources.add(ZIGZAG, (rails, 0), key=rail_order, meta=("redefence", rails, rail_order))
+    return sources

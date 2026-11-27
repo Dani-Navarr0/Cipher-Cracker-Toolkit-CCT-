@@ -40,6 +40,35 @@ def encrypt_columnar(plain_codes, width, layout, order):
     return bytes(out)
 
 
+
+def reference_records(codes, crib_pos, valtab, ncombo, width, mode, prefix, periods, min_checks,
+                   start_tail=None, max_orders=None):
+    """Test-only reference search (the toolkit runs the C engine): ([(column order, combo, order, period, checks)], orders)."""
+    ncrib = len(crib_pos)
+    fixed = [(period, crib.same_slot_pairs(crib_pos, period)) for period in periods]
+    rest = sorted(c for c in range(width) if c not in prefix)
+    records, orders = [], 0
+    tails = permutations(rest)
+    if start_tail is not None:
+        tails = (t for t in permutations(rest) if list(t) >= list(start_tail))
+    for tail in tails:
+        if max_orders is not None and orders >= max_orders:
+            break
+        key = list(prefix) + list(tail)
+        src = crib.source_positions(len(codes), width, mode, key)
+        slots = [src[p] for p in crib_pos]
+        letters = [codes[s] for s in slots]
+        moving = [(period, crib.same_slot_pairs(slots, period)) for period in periods]
+        orders += 1
+        for combo in range(ncombo):
+            values = [valtab[(combo * ncrib + k) * 26 + letters[k]] for k in range(ncrib)]
+            for order, plan in ((0, fixed), (1, moving)):
+                for period, pairs in plan:
+                    if len(pairs) >= min_checks and all(values[a] == values[b] for a, b in pairs):
+                        records.append((key, combo, order, period, len(pairs)))
+    return records, orders
+
+
 class DescriptorTests(unittest.TestCase):
     def test_descriptors_match_make_permuter(self):
         rng = random.Random(1)
@@ -155,7 +184,7 @@ class KnownPlaintextTests(unittest.TestCase):
             for width, prefix in ((5, ()), (7, ()), (9, (3, 0))):
                 for layout in LAYOUTS:
                     args = (codes, crib_pos, valtab, len(combos), width, layout, prefix, list(range(1, 31)), 2)
-                    python = crib.python_records(*args)
+                    python = reference_records(*args)
                     self.assertEqual(python, crib.native_records(*args), (len(codes), width, layout))
                     if opencl.pick_device() is not None and len(codes) <= 256:
                         self.assertEqual(sorted(python[0]), sorted(gpu.crib_records(*args)[0]))

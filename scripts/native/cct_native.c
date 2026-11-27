@@ -1,8 +1,8 @@
 /* Native (C) engines for the Cipher Cracker Toolkit.
  *
  * Built per machine by `python scripts/native_tools.py build` (zig's C compiler from
- * pip). Every engine has a pure-Python reference in the toolkit and the tests
- * require identical results; without the library the Python code runs.
+ * pip). The solvers need it: there is no Python fallback. The tests check the
+ * engines against known answers and small test-only reference implementations.
  *
  * Columnar layouts: for a column order (key), plaintext position i reads
  * ciphertext position
@@ -15,7 +15,8 @@
  *  - cct_perm_bruteforce: every column order, n-gram total of the decryption;
  *    returns the first (lexicographic) order with the highest total.
  *  - cct_perm_anneal: simulated annealing over column orders, the moves and
- *    acceptance rule of permutation_solver / simulated_annealing_transposition.
+ *    acceptance rule of permutation_solver (tool 44; moves 1 swap or reverse,
+ *    moves 0 swap only).
  *  - cct_crib_columnar_periodic: every column order + a periodic key, both
  *    orders, consistent with known plaintext letters (crib_columnar_search.py).
  */
@@ -234,7 +235,7 @@ EXPORT int64_t cct_crib_columnar_periodic(
 /* ---------------------------------------------------------------- shared scoring (version 2) */
 
 /* ngram_scoring.ngram_total: sum of the table scores of every overlapping
- * n-gram of `codes` (0-25), rolling index. Identical to the Python loop. */
+ * n-gram of `codes` (0-25), rolling index. */
 EXPORT int64_t cct_ngram_total(const uint8_t *codes, int32_t n, const uint8_t *scores, int32_t size) {
     return cct_total(codes, n, scores, size);
 }

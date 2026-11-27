@@ -2,14 +2,14 @@
 
 * best_order: exhaustive search (permutation_solver brute force). Returns the
   first column order, in lexicographic order, with the highest n-gram total,
-  which is exactly the order the Python loop keeps (a transposition only
+  which is exactly the order the former Python loop kept (a transposition only
   reorders letters, so the entropy factor is the same for every order and the
   fitness ranks orders by their n-gram total). On the GPU when enabled.
 * anneal: the solvers' simulated annealing (same moves, schedule, acceptance
   rule, progress output), with the C engine's own random number generator
   seeded from Python's `random`.
-Both return None when the native engine cannot be used, and the caller then
-runs its Python code.
+Both return None when a search is outside the engine's limits (width 2-64,
+text at least the n-gram size and the width); there is no Python fallback.
 """
 import ctypes
 import random
@@ -34,7 +34,7 @@ def best_order(ciphertext, width, mode, ngram_model):
         return gpu.best_order(codes, width, mode, ngram_model)
     lib = native.library()
     layout, keep = native.layout_struct(codes, width, mode)
-    scores = native.u8(ngram_model.scores)
+    scores = native.scores_u8(ngram_model.scores)
     key = native.u8(list(range(width)))
     best_key = (ctypes.c_uint8 * width)()
     best_total, done = ctypes.c_int64(-1), ctypes.c_int32(0)
@@ -47,7 +47,7 @@ def best_order(ciphertext, width, mode, ngram_model):
 def order_total(codes, width, mode, ngram_model, order):
     lib = native.library()
     layout, keep = native.layout_struct(codes, width, mode)
-    return lib.cct_order_total(ctypes.byref(layout), native.u8(list(order)), native.u8(ngram_model.scores),
+    return lib.cct_order_total(ctypes.byref(layout), native.u8(list(order)), native.scores_u8(ngram_model.scores),
                                ngram_model.size)
 
 
@@ -62,7 +62,7 @@ def anneal(ciphertext, width, mode, ngram_model, factor, start_perm, starting_te
         return None
     lib = native.library()
     layout, keep = native.layout_struct(codes, width, mode)
-    scores = native.u8(ngram_model.scores)
+    scores = native.scores_u8(ngram_model.scores)
     state = native.AnnealState()
     for i, column in enumerate(start_perm):
         state.current[i] = state.best[i] = column
@@ -71,11 +71,14 @@ def anneal(ciphertext, width, mode, ngram_model, factor, start_perm, starting_te
     state.temp = starting_temp
     for i in range(4):
         state.rng[i] = random.getrandbits(64) or 1
-    while state.temp > 0.1:
-        ran = lib.cct_perm_anneal(ctypes.byref(layout), scores, ngram_model.size, float(count), factor, moves,
-                                  steps_per_temp, cooling_rate, 10, ctypes.byref(state))
-        if progress is not None:
-            progress(list(state.best[:width]), state.best_score, state.temp)
-        if ran == 0:
-            break
+    try:
+        while state.temp > 0.1:
+            ran = lib.cct_perm_anneal(ctypes.byref(layout), scores, ngram_model.size, float(count), factor, moves,
+                                      steps_per_temp, cooling_rate, 10, ctypes.byref(state))
+            if progress is not None:
+                progress(list(state.best[:width]), state.best_score, state.temp)
+            if ran == 0:
+                break
+    except KeyboardInterrupt:       # Ctrl+C between chunks: keep the best order so far
+        print("\nPass interrupted; keeping the best order so far.")
     return list(state.best[:width]), state.best_score

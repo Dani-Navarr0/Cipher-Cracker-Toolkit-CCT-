@@ -10,3 +10,6 @@ scripts/native/build/
 
 # Paradigm Kryptos CTF puzzles and work in progress (not published yet)
 ciphers/paradigm/
+
+# Per-machine compute settings (workers, priority)
+cct_settings.json

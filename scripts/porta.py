@@ -1,14 +1,10 @@
-from concurrent.futures import ProcessPoolExecutor, as_completed
-from typing import List, Dict, Tuple
-import time
+from typing import List, Dict
 from functools import lru_cache
 import os
-import random
-import math
 from utils.utils import get_input_ciphertexts
 import attack_support
 from annealing import Schedule
-from periodic_solver import solve_periodic
+from periodic_solver import CANNOT_START, solve_periodic
 from ngram_scoring import DEFAULT_NGRAM_PATH, load_ngram_scores, score_text
 
 try:
@@ -111,12 +107,6 @@ def highlight_phrases(text: str, phrases: List[str]) -> str:
         highlighted = highlighted.replace(phrase_lower, f"{RED}{phrase_lower}{RESET}")
     return highlighted
 
-def process_batch(args: Tuple) -> List[Dict]:
-    word_batch, ciphertext, target_phrases, alphabet_str, expected_freqs, min_ioc, max_ioc = args
-    return attack_support.score_batch(
-        (decrypt_porta, word_batch, ciphertext, alphabet_str, target_phrases, expected_freqs, min_ioc, max_ioc)
-    )
-
 def run_dictionary_attack(ciphertext: str, alphabet_str: str, expected_freqs: Dict, config: Dict):
     target_phrases = config.get('target_phrases', [])
     min_ioc, max_ioc = config.get('min_ioc', 0.065), config.get('max_ioc', 0.070)
@@ -155,6 +145,10 @@ def porta_rule(c: int, k: int, m: int) -> int:
     return ((c + shift) % half) + half if c < half else (c - half - shift) % half
 
 
+# The dictionary attack runs decrypt_porta's rule in C (attack_support).
+attack_support.register_kernel(decrypt_porta, porta_rule)
+
+
 def run_simulated_annealing(ciphertext: str, alphabet_str: str, expected_freqs: Dict, config: Dict):
     """Anneal the key with the shared engine (geometric 20 -> 0.1 schedule)."""
     key_length = config.get('key_length', 5)
@@ -165,8 +159,7 @@ def run_simulated_annealing(ciphertext: str, alphabet_str: str, expected_freqs: 
     results = solve_periodic(ciphertext, alphabet, alphabet, key_length, porta_rule,
                              expected_freqs, Schedule(iterations), restarts=restarts)
     if results is None:
-        print(f"{RED}Annealing could not start: it needs letters A-Z in the ciphertext, a key length of at least 1, "
-              f"and an alphabet that is a permutation of A-Z.{RESET}")
+        print(f"{RED}{CANNOT_START}{RESET}")
         return []
     best_key = results[0][0]
     best_plaintext = decrypt_porta(ciphertext, best_key, alphabet_str).upper()

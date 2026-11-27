@@ -5,7 +5,7 @@
  *   mean n-gram score (bytes 0-255 from the n-gram table) * letter_entropy^weight
  * with letter_entropy = -sum p log2 p over the 26 letter codes.
  * Annealing: geometric cooling from t_start to t_end over `iterations` moves,
- * accept if diff >= 0 or rand < exp(diff / T) (annealing.anneal in Python).
+ * accept if diff >= 0 or rand < exp(diff / T) (defaults in annealing.Schedule).
  */
 #ifndef CCT_COMMON_H
 #define CCT_COMMON_H
@@ -74,7 +74,7 @@ static inline double cct_fitness(const uint8_t *codes, int n, const uint8_t *sco
     return (double)cct_total(codes, n, scores, size) / count * factor;
 }
 
-/* ---- annealing schedule (annealing.Schedule / annealing.anneal) */
+/* ---- annealing schedule (annealing.Schedule) */
 static inline double cct_cooling_ratio(double t_start, double t_end, int64_t iterations) {
     return pow(t_end / t_start, 1.0 / (double)(iterations > 0 ? iterations : 1));
 }

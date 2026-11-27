@@ -1,7 +1,7 @@
 """GPU (OpenCL) engines for the columnar searches.
 
-Enabled with the environment variable CCT_GPU=1 (or from menu 45, Native
-Engines); CCT_GPU_DEVICE=<text> picks the GPU whose name contains <text>
+Enabled with the environment variable CCT_GPU=1 (or from menu 91, C
+Engines & GPU); CCT_GPU_DEVICE=<text> picks the GPU whose name contains <text>
 (default: a discrete GPU before an integrated one). Needs only the OpenCL
 runtime that ships with the graphics driver (NVIDIA, AMD, Intel). Results are
 identical to the CPU code: the tests compare them on every GPU present.

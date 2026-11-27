@@ -1,14 +1,10 @@
-from concurrent.futures import ProcessPoolExecutor, as_completed
-from typing import List, Dict, Tuple, Optional
-import time
+from typing import List, Dict
 from functools import lru_cache
 import os
-import random
-import math
 from utils.utils import get_input_ciphertexts
 import attack_support
 from annealing import Schedule
-from periodic_solver import solve_periodic
+from periodic_solver import CANNOT_START, solve_periodic
 from ngram_scoring import DEFAULT_NGRAM_PATH, load_ngram_scores, score_text
 
 # --- KASISKI IMPORT ---
@@ -104,6 +100,15 @@ def decrypt_beaufort(ciphertext: str, key: str, alphabet_str: str) -> str:
             plaintext.append(char.lower())
     return ''.join(plaintext)
 
+
+def beaufort_rule(c: int, k: int, m: int) -> int:
+    """Beaufort decryption for alphabet indices (same maths as decrypt_beaufort): P = K - C."""
+    return (k - c) % m
+
+
+# The dictionary attack runs decrypt_beaufort's rule in C (attack_support).
+attack_support.register_kernel(decrypt_beaufort, beaufort_rule)
+
 load_dictionary = attack_support.load_dictionary
 contains_all_phrases = attack_support.contains_all_phrases
 
@@ -114,16 +119,6 @@ def highlight_phrases(text: str, phrases: List[str]) -> str:
         phrase_lower = phrase.lower().replace(" ", "")
         highlighted_text = highlighted_text.replace(phrase_lower, f"{RED}{phrase_lower}{RESET}")
     return highlighted_text
-
-# --- ATTACK FUNCTIONS ---
-def process_batch(args: Tuple) -> List[Dict]:
-    word_batch, ciphertext, target_phrases, alphabet_str, expected_freqs, min_ioc, max_ioc = args
-    return attack_support.score_batch(
-        (decrypt_beaufort, word_batch, ciphertext, alphabet_str, target_phrases, expected_freqs, min_ioc, max_ioc)
-    )
-
-def batch_words(words: List[str], batch_size: int = 500) -> List[List[str]]:
-    return [words[i:i + batch_size] for i in range(0, len(words), batch_size)]
 
 def run_dictionary_attack(ciphertext: str, alphabet_str: str, expected_freqs: Dict, config: Dict):
     target_phrases = config.get('target_phrases', [])
@@ -176,12 +171,6 @@ def run_dictionary_attack(ciphertext: str, alphabet_str: str, expected_freqs: Di
         
     return filtered_results
 
-def generate_neighbor_key(key: str, alphabet: str) -> str:
-    key_list = list(key)
-    pos = random.randint(0, len(key_list) - 1)
-    key_list[pos] = random.choice(alphabet)
-    return "".join(key_list)
-
 def run_simulated_annealing_attack(ciphertext: str, alphabet_str: str, expected_freqs: Dict, config: Dict):
     """Anneal the key with the shared engine (geometric 20 -> 0.1 schedule).
 
@@ -196,12 +185,10 @@ def run_simulated_annealing_attack(ciphertext: str, alphabet_str: str, expected_
     alphabet, _ = get_alphabet(alphabet_str)
     results = solve_periodic(
         ciphertext, alphabet, alphabet, key_length,
-        lambda c, k, m: (k - c) % m,            # Beaufort: P = K - C
-        expected_freqs, Schedule(iterations), restarts=restarts,
+        beaufort_rule, expected_freqs, Schedule(iterations), restarts=restarts,
     )
     if results is None:
-        print(f"{RED}Annealing could not start: it needs letters A-Z in the ciphertext, a key length of at least 1, "
-              f"and an alphabet that is a permutation of A-Z.{RESET}")
+        print(f"{RED}{CANNOT_START}{RESET}")
         return []
 
     best_key = results[0][0]

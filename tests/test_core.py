@@ -100,7 +100,7 @@ class CipherFixTests(unittest.TestCase):
                 cipher.append(mixed[(ALPHABET.index(char) + int(running[k])) % 26])
                 k += 1
         self.assertEqual(gromark.decrypt_gromark("".join(cipher), mixed, running, ALPHABET), plain.lower())
-        self.assertEqual(sum(len(batch) for batch in gromark.batch_primers()), 100000)
+        # (the primer enumeration of tool 71's old Python search was removed; tool 34 searches primers in C)
 
     def test_gronsfeld_ignores_spaces_for_key_position(self):
         import Gronsfeld

@@ -75,11 +75,11 @@ def run():
     periodic = sorted((row for row in rows if row[4]), key=lambda row: (-(len(crib) - row[4]), -row[0]))
     if periodic:
         print(f"\n{CYAN}Fragments that repeat themselves{RESET} {GREY}(where a periodic key would repeat inside "
-              f"the crib; more confirming letters = less likely chance; try that key length in tools 1, 13 or 30):{RESET}")
+              f"the crib; more confirming letters = less likely chance; try that key length in tools 21, 22 or 23):{RESET}")
         for score, position, variant, fragment, period in periodic[:8]:
             print(f"  position {position + 1}, {VARIANTS[variant][0]}: {fragment} (period {period}, "
                   f"{len(crib) - period} letters confirm)")
-    print(f"\n{GREY}A real word or text fragment as the key means a word key or a running key (tool 16). "
+    print(f"\n{GREY}A real word or text fragment as the key means a word key or a running key (tool 32). "
           f"Short cribs (under ~6 letters) give many chance words.{RESET}")
     if input("Show every position? (y/[N]): ").strip().lower() == "y":
         for score, position, variant, fragment, period in sorted(rows, key=lambda row: (row[1], row[2])):

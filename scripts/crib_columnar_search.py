@@ -4,8 +4,8 @@ Given a ciphertext and some known plaintext letters at known positions, tests
 every column order of every width in a range (4 layouts), with a periodic
 Vigenere/Beaufort key of every length in a range, in both layer orders, and
 keeps the hypotheses on which every known letter agrees. See native/crib.py for
-the method. Runs in C or on the GPU when available (native_tools.py), else in
-Python; the results are the same.
+the method. Runs in C, or on the GPU when enabled (menu 91); the C engines
+must be built.
 """
 import math
 import time
@@ -99,8 +99,8 @@ def run():
     banner("Known-Plaintext Columnar Search", "Columnar transposition + periodic key, consistent with known letters")
     from native import gpu
     import native
-    engine = "GPU" if gpu.enabled() else ("C" if native.available() else "Python")
-    print(f"{GREY}Engine: {engine} (menu 45 builds the C engines and enables the GPU){RESET}")
+    engine = "GPU" if gpu.enabled() else ("C" if native.available() else "not built")
+    print(f"{GREY}Engine: {engine} (menu 91 builds the C engines and enables the GPU){RESET}")
     ciphertext = input("Ciphertext: ").strip()
     known_text = input("Known plaintext as WORD@position, comma-separated (1-indexed), e.g. ATTACK@12: ")
     try:
@@ -123,8 +123,6 @@ def run():
     keyword = input(f"Keyword for a keyed alphabet (optional, e.g. {KEYWORD_EXAMPLE}): ").strip().upper()
     if keyword:
         alphabets["KW"] = keyed_alphabet(keyword)
-    if max(widths) > 11 and engine == "Python":
-        print(f"{YELLOW}Widths above 11 are very slow in Python; build the native engines first (menu 45).{RESET}")
     started = time.time()
     try:
         hits, tests, min_checks, combos = run_search(ciphertext, known, widths, periods, alphabets)

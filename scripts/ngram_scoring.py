@@ -41,8 +41,7 @@ def codes_to_text(codes: bytes | bytearray) -> str:
 
 
 def _native_ngram_total():
-    """The C version of ngram_total when the native library is built (identical
-    results, checked in tests/test_native.py), else None."""
+    """The C n-gram total, or None when the library is not built."""
     import os
     if os.environ.get("CCT_NATIVE", "1") == "0":
         return None
@@ -55,33 +54,30 @@ def _native_ngram_total():
     except Exception:
         return None
 
-    def ngram_total(codes, scores, ngram_size):
+    def total(codes, scores, ngram_size):
         if not isinstance(codes, bytes):
             codes = bytes(codes)
         return function(codes, len(codes), pointer(scores), ngram_size)
-    return ngram_total
-
-
-def ngram_total_python(codes: bytes | bytearray, scores: bytes | bytearray, ngram_size: int) -> int:
-    """Sum the table scores of every overlapping n-gram in ``codes`` (0-25 values).
-
-    Uses a rolling index so each position costs one multiply-add instead of
-    ``ngram_size`` of them. This is the hot loop of every n-gram solver.
-    """
-    if len(codes) < ngram_size:
-        return 0
-    modulus = 26 ** (ngram_size - 1)
-    index = 0
-    for code in codes[:ngram_size - 1]:
-        index = index * 26 + code
-    total = 0
-    for code in codes[ngram_size - 1:]:
-        index = index % modulus * 26 + code
-        total += scores[index]
     return total
 
 
-ngram_total = _native_ngram_total() or ngram_total_python
+_c_total = _native_ngram_total()
+
+
+def ngram_total(codes: bytes | bytearray, scores: bytes | bytearray, ngram_size: int) -> int:
+    """Sum of the table scores of every overlapping n-gram of ``codes`` (0-25
+    letter codes), computed in C. The hot loop of every solver. Raises
+    native.NativeUnavailable (with build instructions) when the C library is
+    not built; it is looked up again on each call until it is, so building it
+    from menu 91 works without a restart."""
+    global _c_total
+    if _c_total is None:
+        _c_total = _native_ngram_total()
+        if _c_total is None:
+            import native
+            native.require()
+            raise native.NativeUnavailable(native.MISSING_MESSAGE)
+    return _c_total(codes, scores, ngram_size)
 
 
 @dataclass(frozen=True)

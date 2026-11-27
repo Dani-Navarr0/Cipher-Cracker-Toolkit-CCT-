@@ -1,6 +1,6 @@
 """Python wrappers for the version-2 kernels: n-gram totals, keyed-alphabet
-periodic fits and the Gromark primer screen. Each returns None when the C
-library is not available, so callers fall back to their Python code."""
+periodic fits and the Gromark primer screen. Each raises
+native.NativeUnavailable when the C library is not built."""
 import ctypes
 
 import native
@@ -39,9 +39,8 @@ def _scores_pointer(scores):
 
 
 def ngram_total(codes, scores, size):
+    native.require()
     lib = native.library()
-    if lib is None:
-        return None
     if not isinstance(codes, bytes):
         codes = bytes(codes)
     return lib.cct_ngram_total(codes, len(codes), _scores_pointer(scores), size)
@@ -50,8 +49,7 @@ def ngram_total(codes, scores, size):
 def keyed_periodic_chi(counts, period, alphabets, mode, variant, expected):
     """counts: list of period lists of 26 ints; alphabets: list of 26-byte
     letter-code strings. Returns a list of total chi-squared values."""
-    if native.library() is None:
-        return None
+    native.require()
     flat = (ctypes.c_int32 * (period * 26))(*[value for column in counts for value in column])
     packed = b"".join(alphabets)
     expected_c = (ctypes.c_double * 26)(*expected)
@@ -61,8 +59,7 @@ def keyed_periodic_chi(counts, period, alphabets, mode, variant, expected):
 
 
 def gromark_scores(cipher, base, plen, sign, logp, first, count):
-    if native.library() is None:
-        return None
+    native.require()
     cipher = bytes(cipher)
     logp_c = (ctypes.c_double * 26)(*logp)
     out = (ctypes.c_double * count)()

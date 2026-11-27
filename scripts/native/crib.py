@@ -14,12 +14,11 @@ Key conventions (alphabets as index tables, PA plaintext, CA ciphertext):
   Beaufort  c = CA[k - PA(p)]   ->  k = CA(c) + PA(p)
 (Variant Beaufort's key is minus the Vigenere key, so it passes the same checks.)
 
-Engines: pure Python (the reference), C (native library) and OpenCL GPU; the
-tests require identical results.
+Engines: C (native library) and OpenCL GPU; the tests require identical
+results (and compare them with a small test-only reference search).
 """
 import ctypes
 import math
-from itertools import permutations
 
 ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 LAYOUTS = ("write_rows_read_cols", "write_rows_read_rows", "write_cols_read_rows", "write_cols_read_cols")
@@ -61,34 +60,6 @@ def value_table(combos, crib_plain):
     return bytes(out)
 
 
-def python_records(codes, crib_pos, valtab, ncombo, width, mode, prefix, periods, min_checks,
-                   start_tail=None, max_orders=None):
-    """Reference implementation: ([(column order, combo, order, period, checks)], orders)."""
-    ncrib = len(crib_pos)
-    fixed = [(period, same_slot_pairs(crib_pos, period)) for period in periods]
-    rest = sorted(c for c in range(width) if c not in prefix)
-    records, orders = [], 0
-    tails = permutations(rest)
-    if start_tail is not None:
-        tails = (t for t in permutations(rest) if list(t) >= list(start_tail))
-    for tail in tails:
-        if max_orders is not None and orders >= max_orders:
-            break
-        key = list(prefix) + list(tail)
-        src = source_positions(len(codes), width, mode, key)
-        slots = [src[p] for p in crib_pos]
-        letters = [codes[s] for s in slots]
-        moving = [(period, same_slot_pairs(slots, period)) for period in periods]
-        orders += 1
-        for combo in range(ncombo):
-            values = [valtab[(combo * ncrib + k) * 26 + letters[k]] for k in range(ncrib)]
-            for order, plan in ((0, fixed), (1, moving)):
-                for period, pairs in plan:
-                    if len(pairs) >= min_checks and all(values[a] == values[b] for a, b in pairs):
-                        records.append((key, combo, order, period, len(pairs)))
-    return records, orders
-
-
 def source_positions(length, width, mode, key):
     """src[i] = ciphertext position read at plaintext position i. Uses
     transposition_core.make_permuter (bytes, so up to 256 letters) and the
@@ -110,7 +81,7 @@ def source_positions(length, width, mode, key):
 
 def native_records(codes, crib_pos, valtab, ncombo, width, mode, prefix, periods, min_checks,
                    start_tail=None, max_orders=None):
-    """C engine: same result as python_records."""
+    """C engine (tests/test_native.py checks it against a reference search)."""
     import native
     lib = native.library()
     layout, keep = native.layout_struct(codes, width, mode)
@@ -144,9 +115,11 @@ def search(codes, crib_pos, valtab, ncombo, width, mode, prefix, periods, min_ch
     if engine == "gpu" or (engine == "auto" and usable and gpu.enabled() and width - len(prefix) >= gpu.MIN_WIDTH):
         return gpu.crib_records(codes, crib_pos, valtab, ncombo, width, mode, tuple(prefix), list(periods),
                                 min_checks)
-    if engine in ("auto", "native") and usable and native.available() and width <= native.MAXW:
-        return native_records(codes, crib_pos, valtab, ncombo, width, mode, prefix, list(periods), min_checks)
-    return python_records(codes, crib_pos, valtab, ncombo, width, mode, prefix, list(periods), min_checks)
+    native.require()
+    if not usable or width > native.MAXW:
+        raise ValueError(f"Outside the C engine's limits: width at most {native.MAXW} and the text length, at most "
+                         f"{native.MAXCRIB} known letters, key lengths below {native.MAXP}.")
+    return native_records(codes, crib_pos, valtab, ncombo, width, mode, prefix, list(periods), min_checks)
 
 
 def decrypt(codes, crib_pos, crib_plain, combo, width, mode, column_order, order, period):

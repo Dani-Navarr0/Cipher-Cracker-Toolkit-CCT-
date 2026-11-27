@@ -1,13 +1,17 @@
-"""Optional native (C) and GPU (OpenCL) engines for the toolkit.
+"""The toolkit's C engines (and the optional OpenCL GPU search).
 
-Build once per machine (needs zig's C compiler, a pip package):
+Every search, annealing, brute-force and dictionary engine runs in this one C
+library; there is no Python fallback. Build it once per machine (needs zig's C
+compiler, a pip package):
 
     python -m pip install ziglang
-    python scripts/native_tools.py build        (or menu 45, Native Engines)
+    python scripts/native_tools.py build        (or menu 91, C Engines & GPU)
 
-Without the library, or with the environment variable CCT_NATIVE=0, every tool
-uses its pure-Python code, which stays the reference: the tests require the
-native engines to give identical results.
+Without the library (or with CCT_NATIVE=0) the solvers raise NativeUnavailable
+with these instructions. Each engine is its own .c file in this folder sharing
+cct_common.h; its Python wrapper declares its C functions with function(). The
+tests check the engines against known answers, planted ciphertexts and small
+test-only reference implementations.
 """
 import ctypes
 import os
@@ -42,20 +46,43 @@ class AnnealState(ctypes.Structure):
                 ("temp", _f64), ("iteration", _i64), ("rng", ctypes.c_uint64 * 4)]
 
 
+PENDING = LIBRARY + ".new"
+
+
+def _install_pending():
+    """Move a freshly built library into place (possible once no process has the old one loaded)."""
+    if os.path.exists(PENDING):
+        try:
+            os.replace(PENDING, LIBRARY)
+        except OSError:
+            pass
+
+
 def build(verbose=True):
-    """Compile the C engines with zig's C compiler (python -m pip install ziglang)."""
+    """Compile the C engines with zig's C compiler (python -m pip install ziglang).
+
+    The library is written next to the current one and then moved into place.
+    On Windows a library that a running process has loaded cannot be replaced:
+    the new build then waits as cct_native.dll.new and is installed the next
+    time the toolkit starts. Returns "built" or "pending"."""
     os.makedirs(BUILD, exist_ok=True)
-    # -march=native: the library is built on the machine that runs it
-    command = [sys.executable, "-m", "ziglang", "cc", "-O3", "-march=native", "-shared", "-o", LIBRARY, *SOURCES]
+    # -march=native: the library is built on the machine that runs it.
+    # -ffp-contract=off: no fused multiply-add, so C fitness values equal the Python definitions.
+    command = [sys.executable, "-m", "ziglang", "cc", "-O3", "-march=native", "-ffp-contract=off", "-shared", "-o", PENDING,
+               *SOURCES]
     if sys.platform != "win32":
         command.insert(5, "-fPIC")
     if verbose:
         print(" ".join(command))
     subprocess.run(command, check=True)
+    try:
+        os.replace(PENDING, LIBRARY)
+    except OSError:
+        return "pending"
     global _lib, _tried
     _lib, _tried = None, False
     _functions.clear()
-    return LIBRARY
+    return "built"
 
 
 def library():
@@ -64,6 +91,7 @@ def library():
     if _tried:
         return _lib
     _tried = True
+    _install_pending()
     if os.environ.get("CCT_NATIVE", "1") == "0" or not os.path.exists(LIBRARY):
         return None
     try:
@@ -78,10 +106,10 @@ def library():
 
 
 class NativeUnavailable(RuntimeError):
-    """The C engines are not built (menu 45, or: python scripts/native_tools.py build)."""
+    """The C engines are not built (menu 91, or: python scripts/native_tools.py build)."""
 
 
-MISSING_MESSAGE = ("The C engines are not built. Build them once with menu 45 (Native Engines), or:\n"
+MISSING_MESSAGE = ("The C engines are not built. Build them once with menu 91 (C Engines & GPU), or:\n"
                    "    python -m pip install ziglang\n    python scripts/native_tools.py build")
 _functions = {}
 
@@ -99,7 +127,7 @@ def function(name, restype, argtypes):
     try:
         found = getattr(lib, name)
     except AttributeError:
-        raise NativeUnavailable(f"The C library is out of date (it lacks {name}): rebuild it with menu 45.") from None
+        raise NativeUnavailable(f"The C library is out of date (it lacks {name}): rebuild it with menu 91.") from None
     found.restype = restype
     found.argtypes = argtypes
     _functions[name] = found
@@ -136,6 +164,24 @@ def u8(values):
     if isinstance(values, (bytes, bytearray)):
         return (ctypes.c_uint8 * max(1, len(values))).from_buffer_copy(bytes(values) or bytes(1))
     return (ctypes.c_uint8 * max(1, len(values)))(*values)
+
+
+_table_cache = {}
+
+
+def scores_u8(scores):
+    """An n-gram table as a uint8 array for the C engines, made once per table
+    (a bytearray is shared without copying; bytes are copied once). Copying the
+    11.9 MB 5-gram table on every call cost more than many searches."""
+    cached = _table_cache.get(id(scores))
+    if cached is not None and cached[0] is scores:
+        return cached[1]
+    if isinstance(scores, bytearray):
+        array = (ctypes.c_uint8 * len(scores)).from_buffer(scores)
+    else:
+        array = (ctypes.c_uint8 * len(scores)).from_buffer_copy(scores)
+    _table_cache[id(scores)] = (scores, array)
+    return array
 
 
 def i32(values):

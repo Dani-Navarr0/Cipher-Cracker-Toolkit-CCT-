@@ -38,15 +38,26 @@ def encrypt_rail_fence(plaintext, rails, offset=0):
 
 
 def rank_all(letters, max_rails, fitness):
-    """Every rail count 2..max_rails and every offset, on the text and on its reverse."""
-    from ngram_scoring import text_to_codes
+    """Every rail count 2..max_rails and every offset, on the text and on its
+    reverse, scored in C (``fitness``: an annealing.Fitness, normally
+    cipher_profile.fitness_function()). Returns every reading, best first:
+    (fitness, rails, offset, text reversed, plaintext); ties keep the order
+    text forwards then reversed, rails, offset."""
+    from native.screens import FORWARD, READ, REVERSED, ZIGZAG, Sources, record_of, symbol_codes
+    codes, shown, decode = symbol_codes(letters)
+    n = len(codes)
+    sources = Sources(n)
+    keys = []
+    for rails in range(2, max_rails + 1):
+        for offset in range(2 * (rails - 1)):
+            sources.add(ZIGZAG, (rails, offset), directions=READ, meta=("rail_fence", rails, offset))
+            keys.append((rails, offset))
     results = []
-    for reverse in (False, True):
-        source = letters[::-1] if reverse else letters
-        for rails in range(2, max_rails + 1):
-            for offset in range(2 * (rails - 1)):
-                plain = decrypt_rail_fence(source, rails, offset)
-                results.append((fitness(text_to_codes(plain)), rails, offset, reverse, plain))
+    for reverse, text in ((False, FORWARD), (True, REVERSED)):
+        _, scored = sources.score(codes, fitness, text=text)
+        plains = sources.plain(shown, [ident for _, ident in scored])
+        results += [(score, *keys[record_of(ident)], reverse, decode(plain))
+                    for (score, ident), plain in zip(scored, plains)]
     results.sort(key=lambda result: -result[0])
     return results
 

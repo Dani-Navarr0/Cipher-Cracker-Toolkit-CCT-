@@ -1,14 +1,14 @@
-"""Keyless Playfair attack: simulated annealing over the 5x5 key square on the
-shared engine (same fitness as the other solvers; cooling from 8 to 0.1).
+"""Keyless Playfair attack: simulated annealing over the 5x5 key square, run
+entirely in C (native/digraphic.c; same fitness as the other solvers, cooling
+from 8 to 0.1, then a polish over every letter swap).
 
-Moves on the square: swap two letters (most moves), swap two rows, swap two
-columns, flip top-bottom, flip left-right, transpose. The letter swaps find
-the square's content; the structural moves fix its arrangement, since
-squares that differ by a row/column rotation decrypt identically.
+Moves on the square: swap two letters (90%), swap two rows (4%), swap two
+columns (4%), flip top-bottom (1%), flip left-right (0.5%), transpose (0.5%).
+The letter swaps find the square's content; the structural moves fix its
+arrangement, since squares that differ by a row/column rotation decrypt
+identically. Square below is the one-shot encrypt/decrypt helper.
 """
 import random
-
-from annealing import Fitness, Schedule, anneal, hill_climb
 
 SQUARE_ALPHABET = "ABCDEFGHIKLMNOPQRSTUVWXYZ"   # J merged into I
 
@@ -71,66 +71,27 @@ class Square:
                 out[i + 1] = grid[rb * 5 + ca]
         return bytes(out)
 
-    def move(self):
-        self._saved = self.grid[:]
-        grid = self.grid
-        roll = random.random()
-        if roll < 0.9:
-            i, j = random.sample(range(25), 2)
-            grid[i], grid[j] = grid[j], grid[i]
-        elif roll < 0.94:
-            r1, r2 = random.sample(range(5), 2)
-            grid[r1 * 5:r1 * 5 + 5], grid[r2 * 5:r2 * 5 + 5] = grid[r2 * 5:r2 * 5 + 5], grid[r1 * 5:r1 * 5 + 5]
-        elif roll < 0.98:
-            c1, c2 = random.sample(range(5), 2)
-            for r in range(5):
-                grid[r * 5 + c1], grid[r * 5 + c2] = grid[r * 5 + c2], grid[r * 5 + c1]
-        elif roll < 0.99:
-            self.grid = [grid[(4 - r) * 5 + c] for r in range(5) for c in range(5)]
-        elif roll < 0.995:
-            self.grid = [grid[r * 5 + (4 - c)] for r in range(5) for c in range(5)]
-        else:
-            self.grid = [grid[c * 5 + r] for r in range(5) for c in range(5)]
-        self._index()
-
-    def undo(self):
-        self.grid = self._saved
-        self._index()
-
     def key(self) -> str:
         return "".join(SQUARE_ALPHABET[i] for i in self.grid)
 
 
+def _cipher(cipher: bytes, ngram_model):
+    from native import digraphic
+    return digraphic.make_cipher(digraphic.PLAYFAIR, cipher, 25, to_az(bytes(range(25))), ngram_model)
+
+
 def solve(ciphertext: str, ngram_model, iterations: int = 1_000_000, seed=None, report=None, t_start: float = 8.0):
-    """One annealing run. Returns (fitness, square string, plaintext)."""
+    """One annealing run (C). Returns (fitness, square string, plaintext).
+    ``report(step, temperature, best fitness, [best square])`` is called after every chunk of moves."""
+    from native import digraphic
     if seed is not None:
         random.seed(seed)
     cipher = prepare(ciphertext)
-    fitness = Fitness(ngram_model, 0.5)
-    square = Square()
-
-    def score():
-        return fitness(to_az(square.decrypt(cipher)))
-
-    def propose():
-        square.move()
-        return score()
-
-    best_grid, _ = anneal(score(), propose, square.undo, lambda: square.grid[:], Schedule(iterations, t_start), report)
-    square.grid = list(best_grid)
-    square._index()
-
-    # Polish: every single letter swap until none helps.
-    moves = [(i, j) for i in range(25) for j in range(i + 1, 25)]
-
-    def apply_move(move):
-        square._saved = square.grid[:]
-        i, j = move
-        square.grid[i], square.grid[j] = square.grid[j], square.grid[i]
-        square._index()
-        return score()
-
-    final = hill_climb(score(), moves, apply_move, square.undo, max_rounds=20)
+    native_cipher = _cipher(cipher, ngram_model)
+    start = random.sample(range(25), 25)
+    final, keys = digraphic.anneal(native_cipher, [start], iterations, t_start, 0.1, random.getrandbits(64),
+                                   polish_rounds=20, report=report)
+    square = Square(keys[0])
     plain = "".join(SQUARE_ALPHABET[i] for i in square.decrypt(cipher))
     return final, square.key(), plain
 
@@ -159,20 +120,20 @@ def attack_interactive(ciphertext: str, default_steps: int = 1_000_000, default_
 
     steps = ask("Annealing steps per run", default_steps)
     runs = ask("Independent runs", default_runs)
-    workers = max(1, min(runs, (os.cpu_count() or 2) - 1))
+    import compute
+    workers = compute.workers(runs)
+    import native
+    from native import digraphic
+    native.require()
     model = load_ngram_scores()
-    square = Square()
-    fitness = Fitness(model, 0.5)
+    trial = 20_000
     started = time.perf_counter()
-    for _ in range(300):
-        square.move()
-        fitness(to_az(square.decrypt(cipher)))
-    per_step = (time.perf_counter() - started) / 300
-    estimate = per_step * steps * runs / workers
-    print(f"{GREY}{runs} runs x {steps:,} steps on {workers} process(es): roughly {estimate / 60:.1f}-"
-          f"{2 * estimate / 60 + 0.1:.1f} min. Measured on a 304-letter text: 2 of 8 runs of 1,000,000 steps "
-          f"found the key (1 of 8 with a hotter start); failed runs stall at about half the fitness, so more "
-          f"runs raise the chance.{RESET}")
+    digraphic.anneal(_cipher(cipher, model), [random.sample(range(25), 25)], trial, 8.0, polish_rounds=0)
+    per_step = (time.perf_counter() - started) / trial
+    estimate = per_step * steps * -(-runs // workers)
+    print(f"{GREY}{runs} runs x {steps:,} steps on {workers} process(es): roughly {estimate:.0f}-"
+          f"{2 * estimate + 1:.0f} s. Measured on one 300-letter text: 6 of 16 runs of 1,000,000 steps "
+          f"found the key; failed runs stall at about half the fitness, so more runs raise the chance.{RESET}")
     if input("Start? ([Y]/n): ").strip().lower() == "n":
         return None
     jobs = [{'ciphertext': ciphertext, 'ngram_path': str(DEFAULT_NGRAM_PATH), 'iterations': steps,

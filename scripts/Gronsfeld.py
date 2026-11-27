@@ -1,16 +1,13 @@
-import heapq
-import itertools
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import os
-from typing import List, Dict, Tuple
+from typing import List, Dict
 from functools import lru_cache
-import random
-import math
-import time
 from collections import Counter
+import compute
 from annealing import Schedule
-from periodic_solver import solve_periodic
-from ngram_scoring import DEFAULT_NGRAM_PATH, DEFAULT_NGRAM_SIZE, load_ngram_scores, resolve_ngram_path, score_text
+from periodic_solver import CANNOT_START, MAX_ALPHABET, solve_periodic
+from native import periodic_engine
+from ngram_scoring import DEFAULT_NGRAM_PATH, DEFAULT_NGRAM_SIZE, load_ngram_scores, resolve_ngram_path
 
 # --- DUMMY UTILS CLASS ---
 class DummyUtils:
@@ -69,9 +66,6 @@ ngram_path = DEFAULT_NGRAM_PATH
 def load_ngram_frequencies(file_path: str) -> Dict[str, float]:
     return load_ngram_scores(file_path)
 
-def calculate_ngram_score(text: str, expected_freqs: Dict[str, float], n: int) -> float:
-    return score_text(text, expected_freqs)
-
 # --- GRONSFELD CORE FUNCTIONS ---
 def highlight_phrases(text: str, phrases: list) -> str:
     highlighted_text = text.lower()
@@ -104,28 +98,50 @@ def gronsfeld_decrypt(ciphertext: str, key: str, alphabet: str) -> str:
 KEEP_PER_BATCH = 50
 
 
+def _exhaustive_context(ciphertext: str, alphabet: str, expected_freqs, known):
+    """The ciphertext prepared for the C exhaustive search, mirroring
+    gronsfeld_decrypt for any alphabet of 1-256 characters: a character whose
+    upper case is found in the alphabet is decrypted (P = C - digit modulo the
+    alphabet length; the key advances) and comes out as alphabet[p].lower();
+    any other character passes through in lower case. Known words: any one of
+    them (lower case) found in that text keeps the row."""
+    m = len(alphabet)
+    if not 1 <= m <= MAX_ALPHABET:
+        raise ValueError(f"The exhaustive search needs an alphabet of 1 to {MAX_ALPHABET} characters.")
+    pieces = []
+    for char in ciphertext:
+        char_upper = char.upper()
+        pieces.append(alphabet.index(char_upper) if char_upper in alphabet else char.lower())
+    table = bytes((c - digit) % m for digit in range(10) for c in range(m))
+    return periodic_engine.TextContext(pieces, table, 10, [char.lower() for char in alphabet], expected_freqs,
+                                       phrases=[word.lower() for word in known or ()], phrase_all=False)
+
+
 def process_exhaustive_batch(args):
-    """Keys start..end-1 (as zero-padded digits), generated here rather than
-    sent from the parent. Returns only phrase matches plus the best
-    KEEP_PER_BATCH by n-gram score, so memory stays flat for any key length."""
+    """Keys start..end-1 (as zero-padded digits), searched in C
+    (cct_periodic_exhaustive). Returns the rows matching a known word plus the
+    best KEEP_PER_BATCH others by n-gram cost (lower is better), as dicts
+    {key, decrypted, ioc, score}, so memory stays flat for any key length."""
     ciphertext, alphabet, start, end, key_length, expected_freqs, known = args
-    kept, matched = [], []
-    for number in range(start, end):
+    context = _exhaustive_context(ciphertext, alphabet, expected_freqs, known)
+    matched, kept = [], []
+    # A number longer than key_length digits is its own (longer) key, as str(number).zfill(key_length).
+    width = max(1, key_length)
+    while start < end:
+        stop = min(end, 10 ** width)
+        if start < stop:
+            found, best = periodic_engine.exhaustive(context, width, 10, start, stop - start, KEEP_PER_BATCH)
+            matched += found
+            kept += best
+            start = stop
+        width += 1
+    kept = sorted(kept, key=lambda row: (row[1], row[0]))[:KEEP_PER_BATCH]
+    rows = []
+    for number, score, ioc in matched + kept:
         key = str(number).zfill(key_length)
-        try:
-            decrypted = gronsfeld_decrypt(ciphertext, key, alphabet)
-        except (ValueError, IndexError):
-            continue
-        score = calculate_ngram_score(decrypted, expected_freqs, 2)
-        if known and any(word.lower() in decrypted for word in known):
-            matched.append((score, key, decrypted))
-        elif len(kept) < KEEP_PER_BATCH:
-            heapq.heappush(kept, (-score, key, decrypted))
-        elif -score > kept[0][0]:
-            heapq.heapreplace(kept, (-score, key, decrypted))
-    entries = matched + [(-negative, key, text) for negative, key, text in kept]
-    return [{'key': key, 'decrypted': text, 'ioc': utils.calculate_ioc(text), 'score': score}
-            for score, key, text in entries]
+        rows.append({'key': key, 'decrypted': gronsfeld_decrypt(ciphertext, key, alphabet), 'ioc': ioc,
+                     'score': score})
+    return rows
 
 def run_exhaustive_attack(ciphertext: str, alphabet: str, expected_freqs: Dict):
     print(f"\n{BLUE}--- Exhaustive Brute-Force Attack ---{RESET}")
@@ -140,24 +156,31 @@ def run_exhaustive_attack(ciphertext: str, alphabet: str, expected_freqs: Dict):
     known_text = input(f"Enter known plaintext words for sorting/highlighting (comma-separated): ").upper()
     known_plaintexts = [word.strip() for word in known_text.split(',')] if known_text.strip() else []
 
+    if not 1 <= len(alphabet) <= MAX_ALPHABET:
+        print(f"{RED}The exhaustive search needs an alphabet of 1 to {MAX_ALPHABET} characters.{RESET}")
+        return
+
     total_combinations = 10 ** key_length
-    print(f"\n{YELLOW}Trying all {total_combinations:,} possible {key_length}-digit keys...{RESET}")
-    
     batch_size = max(1000, total_combinations // 100)
-    num_processes = max(1, os.cpu_count() - 1)
+    batches = [(start, min(start + batch_size, total_combinations))
+               for start in range(0, total_combinations, batch_size)]
+    workers = compute.workers(len(batches))
+    print(f"\n{YELLOW}Trying all {total_combinations:,} possible {key_length}-digit keys "
+          f"({workers} thread(s), C engine)...{RESET}")
 
     results = []
-    with ProcessPoolExecutor(max_workers=num_processes) as executor:
-        futures = []
-        for start in range(0, total_combinations, batch_size):
-            end = min(start + batch_size, total_combinations)
-            futures.append(executor.submit(process_exhaustive_batch, (
-                ciphertext, alphabet, start, end, key_length, expected_freqs, known_plaintexts)))
-
+    executor = ThreadPoolExecutor(max_workers=workers)
+    futures = [executor.submit(process_exhaustive_batch, (
+        ciphertext, alphabet, start, end, key_length, expected_freqs, known_plaintexts)) for start, end in batches]
+    try:
         for i, future in enumerate(as_completed(futures)):
             results.extend(future.result())
             print(f"Progress: {(i + 1) / len(futures):.1%}", end='\r')
-    
+    except KeyboardInterrupt:
+        print(f"\n{YELLOW}Interrupted; ranking the batches finished so far.{RESET}")
+    finally:
+        executor.shutdown(wait=True, cancel_futures=True)
+
     if results:
         for r in results: r['matched_phrases'] = [w for w in known_plaintexts if w.lower() in r['decrypted']]
         results.sort(key=lambda x: (-(len(x['matched_phrases'])), x['score'], -x['ioc']))
@@ -174,11 +197,6 @@ def run_exhaustive_attack(ciphertext: str, alphabet: str, expected_freqs: Dict):
         print(f"\n{RED}NO SOLUTIONS FOUND{RESET}")
 
 # --- SIMULATED ANNEALING ATTACK ---
-def generate_neighbor_numeric_key(key: str) -> str:
-    key_list = list(key)
-    key_list[random.randint(0, len(key_list) - 1)] = str(random.randint(0, 9))
-    return "".join(key_list)
-
 def run_simulated_annealing_attack(ciphertext: str, alphabet: str, config: Dict):
     """Anneal the numeric key with the shared engine (geometric 20 -> 0.1).
 
@@ -205,8 +223,7 @@ def run_simulated_annealing_attack(ciphertext: str, alphabet: str, config: Dict)
         ioc_range=ioc_range, scoring_mode=scoring_mode,
     )
     if results is None:
-        print(f"{RED}Annealing could not start: it needs letters A-Z in the ciphertext, a key length of at least 1, "
-              f"and an alphabet that is a permutation of A-Z.{RESET}")
+        print(f"{RED}{CANNOT_START}{RESET}")
         return
 
     print("\n" + "="*80)

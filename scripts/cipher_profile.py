@@ -22,13 +22,11 @@ The statistics and what each one separates:
   column is one simple substitution of English, so its IoC returns to English.
 * N-gram fitness (the solvers' own score). Used to judge decryptions.
 """
-import math
 import random
 import re
 from collections import Counter
 from dataclasses import dataclass, field
 from functools import lru_cache
-from itertools import permutations
 
 from annealing import Fitness
 from layered import ALPHABET, ENGLISH_FREQUENCIES, TRANSPOSITION_MODES, PeriodicLayer
@@ -151,24 +149,26 @@ def fitness_function(ngram_path: str = str(DEFAULT_NGRAM_PATH)) -> Fitness:
 
 @lru_cache(maxsize=16)
 def references(length: int, ngram_path: str = str(DEFAULT_NGRAM_PATH), samples: int = REFERENCE_SAMPLES) -> dict:
-    """Reference distributions for texts of ``length`` letters (deterministic)."""
+    """Reference distributions for texts of ``length`` letters (deterministic):
+    English passages, shuffled copies of them and uniformly random letters.
+    The shuffles, random texts and every statistic are computed in C
+    (native/screens_stats.c, the definitions of ioc, chi_squared, adjacency and
+    the fitness below)."""
+    from native import screens
     fitness = fitness_function(ngram_path)
     english = english_samples(length, samples, seed=length)
-    rng = random.Random(length + 1)
-    shuffled = []
-    for text in english:
-        letters = list(text)
-        rng.shuffle(letters)
-        shuffled.append(bytes(letters))
-    uniform = [bytes(rng.randrange(26) for _ in range(length)) for _ in range(samples)]
+    shuffled, uniform = screens.reference_samples(english, length, seed=length + 1)
+    english_stats = screens.text_stats(english, length, fitness, ENGLISH_FREQUENCIES)
+    shuffled_stats = screens.text_stats(shuffled, length, fitness, ENGLISH_FREQUENCIES, ("adjacency", "fitness"))
+    random_stats = screens.text_stats(uniform, length, fitness, ENGLISH_FREQUENCIES, ("ioc",))
     return {
-        'english_ioc': Reference(ioc(t) for t in english),
-        'random_ioc': Reference(ioc(t) for t in uniform),
-        'english_chi': Reference(chi_squared(t) for t in english),
-        'english_adjacency': Reference(adjacency(t) for t in english),
-        'shuffled_adjacency': Reference(adjacency(t) for t in shuffled),
-        'english_fitness': Reference(fitness(t) for t in english),
-        'shuffled_fitness': Reference(fitness(t) for t in shuffled),
+        'english_ioc': Reference(english_stats['ioc']),
+        'random_ioc': Reference(random_stats['ioc']),
+        'english_chi': Reference(english_stats['chi']),
+        'english_adjacency': Reference(english_stats['adjacency']),
+        'shuffled_adjacency': Reference(shuffled_stats['adjacency']),
+        'english_fitness': Reference(english_stats['fitness']),
+        'shuffled_fitness': Reference(shuffled_stats['fitness']),
     }
 
 
@@ -223,7 +223,7 @@ def prepare(raw: str) -> Prepared:
             word_lengths = []
         else:
             notes.append("Groups of different lengths may be real word boundaries: a simple substitution that "
-                         "kept them can be attacked by word patterns (tool 33).")
+                         "kept them can be attacked by word patterns (tool 14).")
 
     # Mostly digits, or only a handful of distinct letters: fractionation.
     symbols = digits if len(digits) > len(letters) else letters
@@ -255,23 +255,20 @@ def periodicity(codes, max_period: int, samples: int = PERIOD_SAMPLES, seed: int
     ``z`` is the distance from the chance mean in chance standard deviations.
     Many periods are tested at once, so a single period passing at the 2%
     level would happen by luck in about half of all aperiodic texts; the
-    threshold is therefore Bonferroni-corrected (see ``z_threshold``)."""
-    rng = random.Random(seed)
+    threshold is therefore Bonferroni-corrected (see ``z_threshold``).
+
+    The shuffles and every column IoC are computed in C
+    (native/screens_stats.c); ``seed`` seeds its random generator."""
+    from native import screens
     english = english_samples(len(codes), samples, seed=len(codes) + 2)
-    letters = list(codes)
+    values, columns = screens.periodicity(bytes(codes), max_period, english, seed)
     threshold = z_threshold(max_period - 1)
     rows = []
-    for period in range(1, max_period + 1):
-        chance = []
-        for _ in range(samples):
-            rng.shuffle(letters)
-            chance.append(column_ioc(bytes(letters), period))
+    for period, value, (chance, english_values) in zip(range(1, max_period + 1), values, columns):
         chance_mean = sum(chance) / len(chance)
         chance_sd = (sum((x - chance_mean) ** 2 for x in chance) / len(chance)) ** 0.5 or 1e-9
         chance = Reference(chance)
-        english_values = [column_ioc(text, period) for text in english]
         hypothesis = Reference(english_values)
-        value = column_ioc(codes, period)
         z = (value - chance_mean) / chance_sd
         rows.append({
             'period': period, 'ioc': value, 'z': z,
@@ -382,62 +379,58 @@ rail_fence_order = rail_order  # plaintext position of each ciphertext position
 def attack_routes(codes, fitness, max_rails: int = 30) -> list:
     """Reversal, rail fence (2..max_rails rails, every starting offset), and
     writing the text into a w-column grid read the other way (scytale-like
-    routes, keyless columnar), each also on the reversed text."""
+    routes, keyless columnar), each also on the reversed text. Every reading is
+    generated and scored in C; ties keep the order: text forwards (rail fence,
+    then grids), the reversed text itself, then the same on the reversed text."""
+    from native.screens import BOTH, COLUMNAR, LAYOUTS, READ, ZIGZAG, Sources, record_of
+    codes = bytes(codes)
     n = len(codes)
-    out = []
-    for direction, source in (("", codes), (" (text reversed first)", codes[::-1])):
-        if direction:
-            out.append(Candidate("Reversed text", "-", codes_to_text(source), fitness(source)))
-        for rails in range(2, min(max_rails, n - 1) + 1):
-            for offset in range(2 * (rails - 1)):
-                order = rail_fence_order(n, rails, offset)
-                plain = bytearray(n)
-                for cipher_position, plain_position in enumerate(order):
-                    plain[plain_position] = source[cipher_position]
-                key = f"{rails} rails" + (f", offset {offset}" if offset else "") + direction
-                out.append(Candidate("Rail fence", key, codes_to_text(plain), fitness(plain)))
-        for width in range(2, n // 2 + 1):
-            for mode in TRANSPOSITION_MODES:
-                plain = make_permuter(n, width, mode)(source, list(range(width)))
-                out.append(Candidate("Route (keyless grid)", f"width {width}, {TRANSPOSITION_MODES[mode]}{direction}",
-                                     codes_to_text(plain), fitness(plain)))
-    return _best(out)
-
-
-def attack_small_columnar(codes, fitness, max_width: int, time_limit_orders: int = 60_000) -> list:
-    """Every column order of every width up to ``max_width``, four layouts."""
-    n = len(codes)
-    out = []
-    native_model = None
-    try:
-        import native
-        if native.available():
-            from native import perm as native_perm
-            native_model = load_ngram_scores(str(DEFAULT_NGRAM_PATH))
-            max_width, time_limit_orders = max(max_width, 8), 4 * 40320    # C: widths up to 8
-    except Exception:
-        native_model = None
-    for width in range(2, max_width + 1):
-        if width >= n or math.factorial(width) * 4 > time_limit_orders:
-            break
+    sources = Sources(n)
+    names = []
+    for rails in range(2, min(max_rails, n - 1) + 1):
+        for offset in range(2 * (rails - 1)):
+            sources.add(ZIGZAG, (rails, offset), directions=READ, meta=("rail_fence", rails, offset))
+            names.append(("Rail fence", f"{rails} rails" + (f", offset {offset}" if offset else "")))
+    for width in range(2, n // 2 + 1):
         for mode in TRANSPOSITION_MODES:
-            permute = make_permuter(n, width, mode)
-            if native_model is not None:
-                # C brute force: the same (first) best order as the loop below
-                order = native_perm.best_order(codes_to_text(codes), width, mode, native_model)
-                if order is not None:
-                    plain = permute(codes, order)
-                    out.append(Candidate("Columnar (exhaustive)", f"width {width}, order {list(order)}, "
-                                         f"{TRANSPOSITION_MODES[mode]}", codes_to_text(plain), fitness(plain)))
-                    continue
-            best = None
-            for order in permutations(range(width)):
-                plain = permute(codes, order)
-                score = fitness(plain)
-                if best is None or score > best[0]:
-                    best = (score, order, plain)
-            out.append(Candidate("Columnar (exhaustive)", f"width {width}, order {list(best[1])}, "
-                                 f"{TRANSPOSITION_MODES[mode]}", codes_to_text(best[2]), best[0]))
+            sources.add(COLUMNAR, (width, LAYOUTS[mode]), meta=("columnar", width, mode))
+            names.append(("Route (keyless grid)", f"width {width}, {TRANSPOSITION_MODES[mode]}"))
+    _, scored = sources.score(codes, fitness, text=BOTH)
+    reversed_text = codes[::-1]
+    count = len(names)
+    # (score, position in the original candidate order, id; None = the reversed text itself)
+    ranked = [(score, (ident & 1) * (count + 1) + record_of(ident), ident) for score, ident in scored]
+    ranked.append((fitness(reversed_text), count, None))
+    best = sorted(ranked, key=lambda entry: (-entry[0], entry[1]))[:3]
+    plains = sources.plain(codes, [ident for _, _, ident in best if ident is not None])
+    out = []
+    for score, _, ident in best:
+        if ident is None:
+            out.append(Candidate("Reversed text", "-", codes_to_text(reversed_text), score))
+            continue
+        method, key = names[record_of(ident)]
+        out.append(Candidate(method, key + (" (text reversed first)" if ident & 1 else ""),
+                             codes_to_text(plains.pop(0)), score))
+    return out
+
+
+def attack_small_columnar(codes, fitness, max_width: int = 8) -> list:
+    """Every column order of every width up to ``max_width`` (C brute force,
+    the same first-best order as tool 44), four layouts."""
+    import native
+    from native import perm as native_perm
+    native.require()
+    n = len(codes)
+    out = []
+    model = load_ngram_scores(str(DEFAULT_NGRAM_PATH))
+    for width in range(2, min(max_width, n - 1) + 1):
+        for mode in TRANSPOSITION_MODES:
+            order = native_perm.best_order(codes_to_text(codes), width, mode, model)
+            if order is None:
+                continue
+            plain = make_permuter(n, width, mode)(codes, order)
+            out.append(Candidate("Columnar (exhaustive)", f"width {width}, order {list(order)}, "
+                                 f"{TRANSPOSITION_MODES[mode]}", codes_to_text(plain), fitness(plain)))
     return _best(out)
 
 
@@ -467,37 +460,25 @@ def attack_periodic_keyed(codes, fitness, periods, alphabets=None) -> list:
     """Vigenere and Beaufort on a keyed tableau (rows and columns in the keyed
     alphabet's order), each key letter chosen by letter frequencies:
     Vigenere  p = A[(A.index(c) - A.index(k)) mod 26]
-    Beaufort  p = A[(A.index(k) - A.index(c)) mod 26]"""
+    Beaufort  p = A[(A.index(k) - A.index(c)) mod 26]
+    This is Quagmire III with that alphabet: keyword_periodic.solve_alphabet
+    (shifts chosen in C) does the work."""
+    import keyword_periodic as kp
     out = []
     for name, alphabet in (alphabets or KEYED_ALPHABETS).items():
-        position = [alphabet.index(ALPHABET[code]) for code in range(26)]     # code -> index in keyed alphabet
-        letter = [ord(ch) - 65 for ch in alphabet]                              # keyed index -> code
         for variant in ("vigenere", "beaufort"):
-            tables = []
-            for k in range(26):
-                if variant == "vigenere":
-                    tables.append(bytes(letter[(position[c] - k) % 26] for c in range(26)) + bytes(230))
-                else:
-                    tables.append(bytes(letter[(k - position[c]) % 26] for c in range(26)) + bytes(230))
             for period in periods:
-                plain = bytearray(len(codes))
-                key = []
-                for column in range(period):
-                    letters = codes[column::period]
-                    best = min(range(26), key=lambda k: chi_squared(letters.translate(tables[k])))
-                    key.append(alphabet[best])
-                    plain[column::period] = letters.translate(tables[best])
+                plain, key = kp.solve_alphabet(codes, period, alphabet, 3, 0 if variant == "vigenere" else 1)
                 out.append(Candidate(f"{'Vigenere' if variant == 'vigenere' else 'Beaufort'} ({name} alphabet)",
-                                     f"period {period}, key {''.join(key)}", codes_to_text(plain), fitness(plain)))
+                                     f"period {period}, key {key}", codes_to_text(plain), fitness(plain)))
     return _best(out, top=4)
 
 
 def attack_quagmire(codes, fitness, period) -> list:
     """Quagmire I-III with every dictionary word as the alphabet keyword (C
-    engines; ~9 s on 20 cores), or only the Kryptos/story words without them."""
-    import native
+    engine, keyword_periodic.search)."""
     import keyword_periodic as kp
-    words = kp.load_words() if native.available() else kp.STORY_WORDS
+    words = kp.load_words()
     out = []
     for score, word, mode, variant, key, plain in kp.search(codes, period, kp.distinct_alphabets(words), fitness=fitness)[:3]:
         out.append(Candidate(f"{kp.MODES[mode].split(' (')[0]} {'Vigenere' if variant == 0 else 'Beaufort'}",
@@ -565,7 +546,7 @@ class Pathway:
     title: str
     strength: str            # "solved", "strong", "possible" or "long shot"
     evidence: list
-    tools: list              # (menu number, what to do there)
+    tools: list              # (tool module name, what to do there); the launcher shows its menu number
     plan: list = field(default_factory=list)   # AttackPlan entries
 
 
@@ -653,8 +634,7 @@ def run_instant_attacks(result: Profile, ngram_path: str = str(DEFAULT_NGRAM_PAT
     candidates = attack_affine(codes, fitness)
     if result.flags['counts_kept']:
         candidates += attack_routes(codes, fitness)
-        max_width = 7 if len(codes) <= 400 else 6
-        candidates += attack_small_columnar(codes, fitness, max_width)
+        candidates += attack_small_columnar(codes, fitness)
     if not result.flags['counts_kept'] or result.flags['ioc_borderline']:
         periods = result.period_candidates[:3] or list(range(2, len(result.periods) + 1))
         candidates += attack_periodic(codes, fitness, periods)
@@ -710,7 +690,7 @@ def derive_pathways(p: Profile):
             [f"Read {which}, the text scores {max(s['fitness'], s['fitness_reversed']):.1f}; "
              f"English samples of this length score at least {r['english_fitness'].quantile(LOW_Q):.1f} "
              f"(2nd percentile)."],
-            [(43, "Text Formatter, to clean or reverse it")]))
+            [("text_formatter", "Text Formatter, to clean or reverse it")]))
 
     # ---------------- letter counts kept: substitution and/or transposition
     if f['counts_kept']:
@@ -722,12 +702,12 @@ def derive_pathways(p: Profile):
                                           " Adjacent letters are as independent as shuffled text.")]
             pathways.append(Pathway(
                 "Transposition only (letters English, order scrambled)", strength, evidence,
-                [(22, "Rail Fence: every rail count"), (21, "Scytale: every side count"),
-                 (23, f"Matrix Permutation Solver: brute force widths up to 8-9, annealing above; try {width_hint}"),
-                 (32, "Annealing: Transposition, for wider keys"),
-                 (20, "Columnar Transposition: keyword dictionary and double columnar")],
-                [AttackPlan("Columnar transposition (widths 2-7 were tried exhaustively)", ("trans",), 500_000, 1,
-                            widths=list(range(8, 16)), modes=list(TRANSPOSITION_MODES))]))
+                [("rail_fence", "Rail Fence: every rail count"), ("Scytale", "Scytale: every grid width"),
+                 ("permutation_solver", f"Column-Order Solver: brute force to width 9, annealing above; try {width_hint}"),
+                 ("permutation_solver", "Column-Order Solver: annealing for wider keys"),
+                 ("columnar_transposition", "Keyed & Double Columnar: keyword dictionary and double columnar")],
+                [AttackPlan("Columnar transposition (widths 2-8 were tried exhaustively)", ("trans",), 500_000, 1,
+                            widths=list(range(9, 16)), modes=list(TRANSPOSITION_MODES))]))
         else:
             # Adjacency decides between the two; when it is in neither range
             # alone, both are listed as "possible", the nearer one first.
@@ -740,16 +720,16 @@ def derive_pathways(p: Profile):
                 [ioc_line, chi_line + " The letters are not English letters, but their frequencies have "
                  "English's shape.", adjacency_line + (" Adjacent pairs still have English structure, so "
                                                      "no transposition." if ordered_only else unclear_note)],
-                [(8, "Caesar, every shift"), (10, "Affine, every key"),
-                 (31, "Annealing: Substitution (the general attack)")]
-                + ([(33, "Word Pattern Isomorphism: the word boundaries look preserved")] if p.prepared.word_lengths else []),
+                [("caesar", "Caesar, every shift"), ("affine", "Affine, every key"),
+                 ("simulated_annealing", "Substitution Solver (the general attack)")]
+                + ([("pattern_isomorphism", "Word Pattern Attack: the word boundaries look preserved")] if p.prepared.word_lengths else []),
                 [AttackPlan("Simple substitution", ("sub",), 600_000, 6)])
             combined = Pathway(
                 "Substitution + transposition", "strong" if scrambled_only else "possible",
                 [ioc_line, chi_line, adjacency_line + (" Adjacent letters are as independent as shuffled text: "
                                                        "a transposition is present." if scrambled_only else unclear_note)]
                 + ([f"At {n} letters this is hard: the Two-Layer Solver was measured on 300-600 letters."] if n < 250 else []),
-                [(37, f"Two-Layer Solver, combination 1; try {width_hint}")],
+                [("two_layer", f"Two-Layer Solver, combination 1; try {width_hint}")],
                 [AttackPlan("Substitution + transposition, joint annealing", ("sub", "trans"), 1_500_000, 2,
                             widths=widths[:6])])
             if ordered_only:
@@ -776,10 +756,11 @@ def derive_pathways(p: Profile):
                  f"(multiples of the key length also pass)."]
                 + ([f"Kasiski: distances between repeats share the factors "
                     f"{', '.join(f'{k} ({v}x)' for k, v in p.kasiski[:4])}."] if p.kasiski else []),
-                [(30, f"Vigenere Auto-Solver (key length {period})"),
-                 (1, f"Vigenere: anneal key length {period}, or try a keyed alphabet such as KRYPTOS"),
-                 (13, "Beaufort"), (14, "Porta"), (3, "Gronsfeld, if the key shifts are all 0-9"),
-                 (37, f"Two-Layer Solver combination 4 or 5 if the alphabets are mixed (Quagmire), period {period}")],
+                [("vigenere_auto_solver", f"Vigenere Auto-Solver (key length {period})"),
+                 ("vigenere", f"Vigenere Workbench: anneal key length {period}, or a keyed alphabet such as KRYPTOS"),
+                 ("beaufort", "Beaufort"), ("porta", "Porta"), ("Gronsfeld", "Gronsfeld, if the key shifts are all 0-9"),
+                 ("keyword_periodic", f"Quagmire I-III: every dictionary word as the alphabet keyword, period {period}"),
+                 ("two_layer", f"Two-Layer Solver combination 4 or 5 if the alphabets are mixed (Quagmire), period {period}")],
                 [AttackPlan("Vigenere key (straight alphabet), annealing", ("periodic",), 300_000, 2, periods=[period]),
                  AttackPlan("Beaufort key (straight alphabet), annealing", ("periodic",), 300_000, 2, periods=[period],
                             variant="beaufort"),
@@ -798,15 +779,15 @@ def derive_pathways(p: Profile):
         pathways.append(Pathway(
             "Aperiodic or long key (autokey, running key, Gromark, long Vigenere)",
             "possible" if not periods and not f['ioc_borderline'] else "long shot", aperiodic,
-            [(4, "Autoclave: recover the primer of a plaintext or ciphertext autokey (no word list; tried above)"), (16, "Running key: crib-drag a probable word"),
-             (2, "Gromark"), (34, "Crib dragging, if you can guess a word"),
-             (1, f"Vigenere with a key longer than {len(p.periods)} (annealing)")]))
+            [("autoclave", "Autoclave: recover the primer of a plaintext or ciphertext autokey (no word list; tried above)"), ("running_key", "Running key: crib-drag a probable word"),
+             ("gromark_solver", "Gromark Solver: every primer screened, then the mixed alphabet"), ("crib_drag", "Crib dragging, if you can guess a word"),
+             ("vigenere", f"Vigenere with a key longer than {len(p.periods)} (annealing)")]))
         pathways.append(Pathway(
             "Periodic key combined with a transposition",
             "long shot" if periods or f['ioc_borderline'] else "possible",
             ["A transposition applied AFTER a periodic key moves letters out of their key columns, so no period "
              "shows, while the IoC stays low."],
-            [(37, "Two-Layer Solver, combination 3 (Vigenere-family, then transposition)")],
+            [("two_layer", "Two-Layer Solver, combination 3 (Vigenere-family, then transposition)")],
             [AttackPlan("Vigenere, then transposition, joint annealing", ("periodic", "trans"), 1_500_000, 2,
                         widths=widths[:3], periods=periods[:1] or [5, 7])]))
 
@@ -818,7 +799,7 @@ def derive_pathways(p: Profile):
             [f"{s['distinct']} distinct letters (missing: {s['missing']}), even length, and no letter pair at "
              f"positions 1-2, 3-4, ... is a doubled letter, which a Playfair never outputs."
              + (" J missing is typical of a 5x5 square." if "J" in s['missing'] else "")],
-            [(9, "Playfair: mode A anneals the square (no key needed)"), (15, "Four-Square: annealing")],
+            [("playfair", "Playfair: mode A anneals the square (no key needed)"), ("four_square", "Four-Square: annealing")],
             [AttackPlan("Playfair square, annealing (several runs in parallel)", ("playfair",), 1_000_000, 8)]))
     else:
         reasons = []
@@ -833,14 +814,14 @@ def derive_pathways(p: Profile):
         pathways.append(Pathway(
             "Bifid (Polybius fractionation)", "long shot",
             [f"{s['distinct']} distinct letters fit a 5x5 square, and fractionation flattens frequencies."],
-            [(12, "Bifid")]))
+            [("fractionation_solver", "Bifid / Trifid Solver: anneal the square for each period")]))
     hill_sizes = [m for m in (2, 3, 4) if n % m == 0]
     if hill_sizes and not f['counts_kept']:
         pathways.append(Pathway(
             "Hill cipher", "long shot",
             [f"The length {n} is a multiple of {', '.join(map(str, hill_sizes))}, the block sizes a Hill matrix of "
              f"that size needs."],
-            [(5, "Hill: 2x2 brute force, 3x3 with known plaintext")]))
+            [("hill", "Hill: ciphertext-only 2x2/3x3 attack, or known plaintext")]))
     elif not hill_sizes:
         ruled_out.append(("Hill cipher with 2x2, 3x3 or 4x4 blocks", f"the length {n} is not a multiple of 2, 3 or 4."))
 

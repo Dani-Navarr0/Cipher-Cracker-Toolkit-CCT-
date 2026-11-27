@@ -1,4 +1,4 @@
-"""Native Engines: build the C engines, check their status, tune and enable the GPU.
+"""C Engines & GPU: build the C engines, check their status, tune and enable the GPU.
 
 Command line:  python scripts/native_tools.py build | status | gpu
 """
@@ -14,17 +14,48 @@ from theme import BLUE, GREEN, GREY, RED, RESET, YELLOW, banner  # noqa: E402
 import native  # noqa: E402
 
 
-def build():
+def install_compiler():
+    """Offer to install zig's C compiler (the pip package ziglang) into the
+    Python that is running the toolkit. Returns True when it is importable."""
+    import importlib
+    import subprocess
+    print(f"{YELLOW}zig's C compiler (the pip package ziglang) is not installed for the Python running the "
+          f"toolkit:{RESET}\n  {sys.executable}\n{GREY}(Each Python installation has its own packages; it may be "
+          f"installed for another one.){RESET}")
+    command = [sys.executable, "-m", "pip", "install", "ziglang"]
+    if input(f"I = install it now into this Python ({GREY}{' '.join(command)}{RESET}), Enter = cancel: "
+             ).strip().lower() != "i":
+        print(f"{GREY}To install it yourself:  \"{sys.executable}\" -m pip install ziglang{RESET}")
+        return False
+    if subprocess.run(command).returncode != 0:
+        print(f"{RED}pip could not install ziglang (see its message above).{RESET}")
+        return False
+    importlib.invalidate_caches()
     try:
         import ziglang  # noqa: F401
     except ImportError:
-        print(f"{RED}zig's C compiler is missing: run  python -m pip install ziglang  and try again.{RESET}")
+        print(f"{RED}ziglang installed but cannot be imported yet: restart the toolkit and build again.{RESET}")
         return False
+    return True
+
+
+def build():
+    """Build the C engines. Returns True when the new engines are in use or
+    will be at the next start (Windows keeps a loaded library locked)."""
     try:
-        native.build()
+        import ziglang  # noqa: F401
+    except ImportError:
+        if not install_compiler():
+            return False
+    try:
+        outcome = native.build()
     except Exception as error:      # show the compiler's message
         print(f"{RED}Build failed: {error}{RESET}")
         return False
+    if outcome == "pending":
+        print(f"{GREEN}Built.{RESET} {YELLOW}This toolkit session still has the previous engines loaded (Windows "
+              f"locks a library while it is in use): restart the toolkit to use the new build.{RESET}")
+        return True
     print(f"{GREEN}Native engines built: {native.available()}{RESET}")
     return native.available()
 
@@ -64,7 +95,7 @@ def gpu_menu():
 
 
 def run():
-    banner("Native Engines", "C engines and GPU (OpenCL) for the columnar searches")
+    banner("C Engines & GPU", "Build the C engines every solver needs; OpenCL GPUs for the columnar searches")
     status()
     print(f"\n  {BLUE}1{RESET} Build the C engines   {BLUE}2{RESET} GPU: list, tune, enable   {BLUE}0{RESET} Back")
     choice = input("Select: ").strip()

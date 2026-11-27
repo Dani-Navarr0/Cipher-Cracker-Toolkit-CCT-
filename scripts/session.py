@@ -32,7 +32,19 @@ def get_ciphertext():
 
 def set_ciphertext(text):
     text = " ".join(text.split()) if text else None
+    if text != _state["ciphertext"]:
+        _state["suggestions"] = []      # they described the previous text
     _state["ciphertext"] = text or None
+
+
+def set_suggestions(suggestions):
+    """Tools the analyzer recommends for the current ciphertext, best first:
+    a list of (module or legacy menu number, note). Shown in the main menu."""
+    _state["suggestions"] = list(suggestions)
+
+
+def get_suggestions():
+    return list(_state.get("suggestions") or [])
 
 
 def summary(limit=40) -> str:

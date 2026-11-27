@@ -1,9 +1,10 @@
 import os
 import datetime
-import heapq
 import re
 from utils import utils
-from ngram_scoring import load_ngram_scores, score_text
+import attack_support
+from ngram_scoring import load_ngram_scores
+from native import periodic_engine
 
 KEEP_OUTSIDE_WINDOW = 25
 
@@ -65,70 +66,70 @@ def print_colored_output(input_data, input_format, key, xor_result, ascii_result
     if ioc_ascii is not None and ascii_result:
         print(f"{BLUE}ASCII IoC:{RESET} {ioc_ascii:.6f}")
 
+CHUNK_WORDS = 20_000               # words per C call (one thread each)
+
+
 def brute_force_with_ioc(ciphertext, min_ioc=0.065, max_ioc=0.07, perform_freq_analysis=False, freq_threshold=45.0):
-    """Try each word in the wordlist as a key, filter by IoC for ASCII results."""
+    """Try each word in the wordlist as a key, filter by IoC for ASCII results.
+
+    The XOR, the printable-ASCII filter, the IoC and the n-gram cost of every
+    word run in C (cct_xor_dict); kept are the IoC-window hits and the
+    KEEP_OUTSIDE_WINDOW most English-like non-blank results outside it."""
+    if not os.path.exists(WORDLIST_PATH):
+        print(f"{RED}Error: '{WORDLIST_PATH}' not found in the current directory.{RESET}")
+        return []
     try:
-        if not os.path.exists(WORDLIST_PATH):
-            print(f"{RED}Error: '{WORDLIST_PATH}' not found in the current directory.{RESET}")
-            return []
-            
-        with open(WORDLIST_PATH, 'r', encoding='utf-8') as file:
-            words = [word.strip() for word in file if word.strip()]
+        words, keys = attack_support.read_ascii_keys(WORDLIST_PATH)
     except Exception as e:
         print(f"{RED}Error reading wordlist: {e}{RESET}")
         return []
-    
-    results = []
-    outside, costs = [], {}
+
     model = load_ngram_scores()
     total_words = len(words)
+    # Values outside 0-127 can never XOR (with an ASCII key) to printable text.
+    message = bytes(value if 0 <= value < 128 else 255 for value in ciphertext)
 
-    print(f"\n{YELLOW}Starting brute force with {total_words} words...{RESET}")
+    print(f"\n{YELLOW}Starting brute force with {total_words} words (C engine)...{RESET}")
     print(f"\n-{GREY}IoC filter range: {min_ioc} to {max_ioc} (plus the {KEEP_OUTSIDE_WINDOW} most English-like "
           f"results outside it; ranked by n-gram cost){RESET}")
     if perform_freq_analysis:
         print(f"-{GREY}Frequency analysis will be performed (threshold: {freq_threshold}){RESET}")
-    
-    # Add case variations testing
     print(f"{YELLOW}Testing uppercase versions of each word...{RESET}")
-    
-    words_checked = 0
-    for word in words:
-        words_checked += 1
-        if words_checked % 1000 == 0:
-            print(f"{GREY}Progress: {RED}{words_checked}{RESET}/{YELLOW}{total_words}{RESET} words checked...{RESET}", end='\r')
-        
-        # Skip empty words or words with non-ASCII characters
-        if not word or not all(ord(c) < 128 for c in word):
-            continue
-        
-        test_word = word.upper()
-        xor_result = xor_values(ciphertext, test_word)
-        
-        # Extract printable ASCII
-        ascii_result = get_ascii_result(xor_result)
-        
-        # Calculate IoC
-        ioc_ascii = utils.calculate_ioc(ascii_result)
-        cost = score_text(ascii_result, model)
+
+    chunks = [(first, min(CHUNK_WORDS, total_words - first)) for first in range(0, total_words, CHUNK_WORDS)]
+    parts = attack_support.parallel_chunks(
+        lambda chunk: periodic_engine.xor_dict(message, keys, chunk[0], chunk[1], model, min_ioc, max_ioc,
+                                               KEEP_OUTSIDE_WINDOW),
+        chunks, lambda done, total: print(f"{GREY}Progress: {RED}{done}{RESET}/{YELLOW}{total}{RESET} parts "
+                                          f"checked...{RESET}", end='\r'))
+    window, outside, checked = [], [], 0
+    for (first, count), part in zip(chunks, parts):
+        if part is not None:
+            window += part[0]
+            outside += part[1]
+            checked += count
+    window.sort()
+    # The most English-like outside the window over all chunks (later word wins a tie, as before).
+    outside = sorted(outside, key=lambda row: (row[1], -row[0]))[:KEEP_OUTSIDE_WINDOW]
+    outside.sort(key=lambda row: (row[1], row[0]))
+
+    print(f"{GREY}Completed! {checked} words checked.{RESET}                ")
+    results, costs = [], {}
+    for index, cost, ioc_ascii in window:
+        test_word = words[index]
         costs[test_word] = cost
-
-        # Check result against IoC range
-        if min_ioc <= ioc_ascii <= max_ioc and len(ascii_result.strip()) > 0:
-            if perform_freq_analysis:
-                freq_analysis, likeness_score = utils.analyze_frequency(ascii_result)
-                if likeness_score <= freq_threshold:
-                    results.append((test_word, "ASCII", ascii_result, ioc_ascii, freq_analysis, likeness_score))
-            else:
-                results.append((test_word, "ASCII", ascii_result, ioc_ascii, "", float('inf')))
-        elif ascii_result.strip():
-            # Keep the most English-like results outside the IoC window too.
-            heapq.heappush(outside, (-cost, words_checked, (test_word, "ASCII", ascii_result, ioc_ascii, "", float('inf'))))
-            if len(outside) > KEEP_OUTSIDE_WINDOW:
-                heapq.heappop(outside)
-
-    print(f"{GREY}Completed! {total_words} words checked.{RESET}                ")
-    results += [entry for _, _, entry in outside]
+        ascii_result = get_ascii_result(xor_values(ciphertext, test_word))
+        if perform_freq_analysis:
+            freq_analysis, likeness_score = utils.analyze_frequency(ascii_result)
+            if likeness_score <= freq_threshold:
+                results.append((test_word, "ASCII", ascii_result, ioc_ascii, freq_analysis, likeness_score))
+        else:
+            results.append((test_word, "ASCII", ascii_result, ioc_ascii, "", float('inf')))
+    for index, cost, ioc_ascii in outside:
+        test_word = words[index]
+        costs[test_word] = cost
+        ascii_result = get_ascii_result(xor_values(ciphertext, test_word))
+        results.append((test_word, "ASCII", ascii_result, ioc_ascii, "", float('inf')))
 
     # Frequency-analysis score first if requested, then n-gram cost (lower = more English).
     if perform_freq_analysis:

@@ -1,60 +1,23 @@
-import os
-import heapq
+"""Hill cipher: decryption, encryption, a ciphertext-only attack (row by row,
+in C: native/digraphic_hill.c) and a known-plaintext attack."""
 import itertools
 import math
 import time
-import sys
-from functools import lru_cache
-from typing import List, Dict
-from ngram_scoring import DEFAULT_NGRAM_PATH, load_ngram_scores, score_text
+from ngram_scoring import DEFAULT_NGRAM_PATH, load_ngram_scores
 
-# --- DUMMY UTILS CLASS (to make script standalone) ---
-class DummyUtils:
-    def calculate_ioc(self, text: str) -> float:
-        text = text.upper()
-        text = ''.join(filter(str.isalpha, text))
-        n = len(text)
-        if n < 2: return 0.0
-        freqs = {}
-        for char in text:
-            freqs[char] = freqs.get(char, 0) + 1
-        numerator = sum(count * (count - 1) for count in freqs.values())
-        denominator = n * (n - 1)
-        return numerator / denominator if denominator > 0 else 0.0
+from theme import RED, GREEN, YELLOW, BLUE, GREY, RESET, banner
 
-    def save_to_file_hill(self, results: List[Dict], filename: str):
-        try:
-            with open(filename, 'w', encoding='utf-8') as f:
-                f.write("Hill Cipher Brute-Force Results\n")
-                f.write("=================================\n\n")
-                for result in results:
-                    f.write(f"Key Representation: {result['key_rep']}\n")
-                    f.write("Key Matrix:\n")
-                    for row in result['matrix']:
-                        f.write(f"  {row}\n")
-                    f.write(f"IoC Score: {result.get('ioc', 0):.4f}\n")
-                    f.write(f"N-gram Score: {result.get('bigram_score', 0):.2f}\n")
-                    f.write(f"Decrypted: {result['plaintext']}\n")
-                    f.write("-" * 20 + "\n")
-            print(f"{GREEN}Results successfully saved to {filename}{RESET}")
-        except IOError as e:
-            print(f"{RED}Error saving file: {e}{RESET}")
 
-utils = DummyUtils()
+def calculate_ioc(text: str) -> float:
+    text = "".join(filter(str.isalpha, text.upper()))
+    n = len(text)
+    if n < 2:
+        return 0.0
+    counts = {}
+    for char in text:
+        counts[char] = counts.get(char, 0) + 1
+    return sum(count * (count - 1) for count in counts.values()) / (n * (n - 1))
 
-# --- COLOR CODES AND PATHS ---
-from theme import RED, GREEN, YELLOW, BLUE, CYAN, GREY, WHITE, RESET, banner
-
-data_dir = os.path.join(os.path.dirname(__file__), "data")
-ngram_path = DEFAULT_NGRAM_PATH
-
-# --- SCORING FUNCTIONS ---
-@lru_cache(maxsize=None)
-def load_bigram_frequencies(file_path: str) -> Dict[str, float]:
-    return load_ngram_scores(file_path)
-
-def calculate_bigram_score(text: str, expected_freqs: Dict[str, float]) -> float:
-    return score_text(text, expected_freqs)
 
 # --- HILL CIPHER CORE FUNCTIONS ---
 def matrix_to_key(matrix, alphabet):
@@ -135,80 +98,9 @@ def decrypt_hill(ciphertext, key_matrix, alphabet):
     if inverse_matrix is None: return None
     return decrypt_with_inverse(prepare_ciphertext(ciphertext, alphabet, len(key_matrix)), inverse_matrix, alphabet)
 
-def highlight_phrases(text: str, phrases: list) -> str:
-    highlighted_text = text.lower()
-    if not phrases: return highlighted_text
-    for phrase in phrases:
-        phrase_lower = phrase.lower().replace(" ", "")
-        highlighted_text = highlighted_text.replace(phrase_lower, f"{RED}{phrase_lower}{RESET}")
-    return highlighted_text
-
-def contains_fragment(plaintext, fragment):
-    return fragment.lower().replace(" ", "") in plaintext.lower().replace(" ", "")
-
 def is_valid_key_matrix(matrix, modulus):
     det = determinant(matrix) % modulus
     return det != 0 and math.gcd(det, modulus) == 1
-
-def generate_all_possible_matrices(matrix_size, alphabet_length):
-    value_range = range(alphabet_length)
-    for values in itertools.product(value_range, repeat=matrix_size*matrix_size):
-        matrix = [list(values[row * matrix_size:(row + 1) * matrix_size]) for row in range(matrix_size)]
-        if is_valid_key_matrix(matrix, alphabet_length):
-            yield matrix
-
-def brute_force_hill_all_keys(ciphertext, alphabet, matrix_size, min_ioc, max_ioc,
-                              known_fragments, max_results, expected_freqs):
-    results = []
-    
-    print(f"\n{YELLOW}Starting brute force with all possible {matrix_size}x{matrix_size} matrices...{RESET}")
-    print(f"{GREY}This may take a very long time. Filtering for valid (invertible) matrices...{RESET}")
-    
-    start_time = time.time()
-    last_update_time = start_time
-    matrices_checked = 0
-
-    cipher_indices = prepare_ciphertext(ciphertext, alphabet, matrix_size)
-    # Keep every fragment match plus the best `max_results` keys by n-gram
-    # cost. (Previously the search kept only IoC-window matches and stopped at
-    # the first max_results in enumeration order, which can miss the real key.)
-    fragment_results = []
-    best_heap = []  # max-heap on cost via negation: (-cost, counter, result)
-    for matrix in generate_all_possible_matrices(matrix_size, len(alphabet)):
-        matrices_checked += 1
-
-        if matrices_checked % 4096 == 0:
-            current_time = time.time()
-            if current_time - last_update_time >= 2:
-                print(f"{GREY}Matrices tested: {matrices_checked:,} | Time: {current_time - start_time:.1f}s{RESET}", end='\r')
-                last_update_time = current_time
-
-        inverse_matrix = modular_inverse(matrix, len(alphabet))
-        if inverse_matrix is None: continue
-        plaintext = decrypt_with_inverse(cipher_indices, inverse_matrix, alphabet)
-        bigram_score = calculate_bigram_score(plaintext, expected_freqs)
-        matched = [f for f in known_fragments if contains_fragment(plaintext, f)] if known_fragments else []
-
-        if not matched and len(best_heap) >= max_results and -best_heap[0][0] <= bigram_score:
-            continue
-        ioc = utils.calculate_ioc(plaintext)
-        result = {
-            'key_rep': matrix_to_key(matrix, alphabet), 'matrix': matrix, 'plaintext': plaintext,
-            'ioc': ioc, 'bigram_score': bigram_score, 'is_fragment_match': bool(matched),
-            'matched_fragments': matched
-        }
-        if matched:
-            fragment_results.append(result)
-        elif len(best_heap) < max_results:
-            heapq.heappush(best_heap, (-bigram_score, matrices_checked, result))
-        else:
-            heapq.heapreplace(best_heap, (-bigram_score, matrices_checked, result))
-
-    results = fragment_results + [entry[2] for entry in best_heap]
-    print(f"\n\n{GREY}Completed! {matrices_checked:,} valid matrices tested.{RESET}")
-
-    results.sort(key=lambda x: (0 if x['is_fragment_match'] else 1, x['bigram_score'], -x['ioc']))
-    return results
 
 # --- CIPHERTEXT-ONLY ROW ATTACK -------------------------------------------
 # Decryption is p_block = D * c_block. Row i of D alone produces plaintext
@@ -222,59 +114,30 @@ ENGLISH_PERCENT = [8.12, 1.49, 2.71, 4.32, 12.02, 2.30, 2.03, 5.92, 7.31, 0.10, 
                    6.95, 7.68, 1.82, 0.11, 6.02, 6.28, 9.10, 2.88, 1.11, 2.09, 0.17, 2.11, 0.07]
 
 
-def _row_outputs(cipher_indices, row, modulus):
-    n = len(row)
-    return bytes(sum(r * c for r, c in zip(row, cipher_indices[i:i + n])) % modulus
-                 for i in range(0, len(cipher_indices), n))
-
-
-def _chi(codes):
-    total = len(codes)
-    return sum((codes.count(c) - ENGLISH_PERCENT[c] * total / 100) ** 2 / (ENGLISH_PERCENT[c] * total / 100)
-               for c in range(26))
-
-
 def row_attack(ciphertext, matrix_size=2, keep_rows=40, top=20, report=None):
-    """Ciphertext-only attack on a Hill cipher over A-Z. Returns up to ``top``
+    """Ciphertext-only attack on a Hill cipher over A-Z (C engine; matrix_size
+    1-4). Stage 1 scores every row by chi-squared and keeps ``keep_rows``;
+    stage 2 ranks every invertible ordered choice of kept rows by fitness.
+    ``report(rows scored)`` is called after stage 1. Returns up to ``top``
     results, best first: dicts with key matrix, inverse, plaintext, fitness."""
-    from annealing import Fitness
+    from native import digraphic
     alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-    cipher = prepare_ciphertext(normalize_input(ciphertext, alphabet), alphabet, matrix_size)
-    scored = []
-    for row in itertools.product(range(26), repeat=matrix_size):
-        g = 0
-        for value in row:
-            g = math.gcd(g, value)
-        if math.gcd(g, 26) != 1:
-            continue  # a row of an invertible matrix mod 26 has entries with gcd 1 (with 26)
-        outputs = _row_outputs(cipher, row, 26)
-        scored.append((_chi(outputs), row, outputs))
-    scored.sort(key=lambda entry: entry[0])
-    best_rows = scored[:keep_rows]
+    if not 1 <= matrix_size <= 4:
+        raise ValueError("row_attack handles 1x1 to 4x4 keys")
+    if not matrix_size <= keep_rows <= 256:
+        raise ValueError("keep_rows must be between the matrix size and 256")
+    cipher = bytes(prepare_ciphertext(normalize_input(ciphertext, alphabet), alphabet, matrix_size))
+    scored, best_rows = digraphic.hill_best_rows(cipher, matrix_size, ENGLISH_PERCENT, keep_rows)
     if report:
-        report(len(scored))
-
-    fitness = Fitness(load_ngram_scores(DEFAULT_NGRAM_PATH), 0.5)
-    blocks = len(cipher) // matrix_size
-    results = []
-    for combo in itertools.permutations(range(len(best_rows)), matrix_size):
-        inverse = [list(best_rows[i][1]) for i in combo]
-        if not is_valid_key_matrix(inverse, 26):
-            continue
-        plain = bytearray(blocks * matrix_size)
-        for position, i in enumerate(combo):
-            plain[position::matrix_size] = best_rows[i][2]
-        score = fitness(plain)
-        if len(results) < top:
-            heapq.heappush(results, (score, combo, bytes(plain), inverse))
-        elif score > results[0][0]:
-            heapq.heapreplace(results, (score, combo, bytes(plain), inverse))
+        report(scored)
+    rows = [row for _, row in best_rows]
     out = []
-    for score, _, plain, inverse in sorted(results, key=lambda entry: -entry[0]):
+    for score, combo in digraphic.hill_combine(cipher, matrix_size, rows, load_ngram_scores(DEFAULT_NGRAM_PATH), top):
+        inverse = [list(rows[i]) for i in combo]
         key = modular_inverse(inverse, 26)
         out.append({'fitness': score, 'key_matrix': key, 'inverse': inverse,
                     'key_rep': matrix_to_key(key, alphabet),
-                    'plaintext': "".join(alphabet[c] for c in plain)})
+                    'plaintext': decrypt_with_inverse(cipher, inverse, alphabet)})
     return out
 
 
@@ -432,7 +295,7 @@ def decrypt_with_specific_key():
     if plaintext:
         print(f"\n{GREEN}Decryption successful:{RESET}")
         print(f"\n{YELLOW}Plaintext:{RESET}\n{plaintext.lower()}")
-        ioc = utils.calculate_ioc(plaintext)
+        ioc = calculate_ioc(plaintext)
         print(f"\n{GREY}Index of Coincidence: {ioc:.6f}{RESET}")
     else:
         print(f"{RED}Decryption failed.{RESET}")
@@ -441,17 +304,16 @@ def run():
     banner("Hill Cipher", "Matrix cipher: decrypt, ciphertext-only attack (2x2 and 3x3), known plaintext, encrypt")
     alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
     print()
-    print(f"  {YELLOW}[1]{RESET} Ciphertext-only attack, 2x2 or 3x3 {GREY}(row by row; recommended){RESET}")
-    print(f"  {YELLOW}[2]{RESET} Exhaustive 2x2 {GREY}(every invertible matrix, ~157,000; slower, same answer){RESET}")
-    print(f"  {YELLOW}[3]{RESET} Known-plaintext attack {GREY}(a crib, position known or not){RESET}")
-    print(f"  {YELLOW}[4]{RESET} Decrypt with a known key")
-    print(f"  {YELLOW}[5]{RESET} Encrypt {GREY}(make a test ciphertext){RESET}")
+    print(f"  {YELLOW}[1]{RESET} Ciphertext-only attack, 2x2 or 3x3 {GREY}(row by row, in C){RESET}")
+    print(f"  {YELLOW}[2]{RESET} Known-plaintext attack {GREY}(a crib, position known or not){RESET}")
+    print(f"  {YELLOW}[3]{RESET} Decrypt with a known key")
+    print(f"  {YELLOW}[4]{RESET} Encrypt {GREY}(make a test ciphertext){RESET}")
     mode = input(f"Select (Enter = 1): ").strip() or "1"
 
-    if mode == '4':
+    if mode == '3':
         decrypt_with_specific_key()
         return
-    if mode == '5':
+    if mode == '4':
         plaintext = input(f"{GREY}Plaintext: {RESET}")
         key_text = normalize_input(input("Key as letters (4 for 2x2, 9 for 3x3, row by row): ").upper(), alphabet)
         if len(key_text) not in (4, 9):
@@ -470,26 +332,15 @@ def run():
     if len(ciphertext) < 8:
         print(f"{RED}Need more letters.{RESET}")
         return
-    if mode == '3':
+    if mode == '2':
         known_plaintext_attack_hill(ciphertext, alphabet)
+        return
+    if mode != '1':
+        print(f"{RED}Invalid selection.{RESET}")
         return
 
     import cipher_profile as cp
     refs = cp.references(len(ciphertext)) if len(ciphertext) >= cp.MIN_LETTERS else None
-    if mode == '2':
-        fragments_input = input(f"Known plaintext fragments to flag (comma-separated, optional): {RESET}")
-        known_fragments = [f.strip() for f in fragments_input.split(',') if f.strip()]
-        results = brute_force_hill_all_keys(ciphertext, alphabet, 2, 0.0, 1.0, known_fragments, 100,
-                                            load_bigram_frequencies(ngram_path))
-        print(f"\n{GREEN}--- TOP 10 ---{RESET} {GREY}(fragment matches first, then n-gram cost; lower is better){RESET}")
-        for i, result in enumerate(results[:10]):
-            marker = YELLOW + " (fragment match)" + RESET if result['is_fragment_match'] else ""
-            print(f"{i + 1:>2}. key {YELLOW}{result['key_rep']}{RESET} {result['matrix']} cost {result['bigram_score']:.2f}{marker}")
-            print(f"    {highlight_phrases(result['plaintext'], result.get('matched_fragments', []))}")
-        if results and input(f"\nSave all {len(results)} results to a file? (y/n): {RESET}").lower() == 'y':
-            utils.save_to_file_hill(results, input("Enter filename: ") or "hill_results.txt")
-        return
-
     size_input = input("Matrix size (2 or 3, Enter = try both): ").strip()
     sizes = [int(size_input)] if size_input in ('2', '3') else [2, 3]
     results = []
@@ -510,7 +361,7 @@ def run():
         print(f"   {result['plaintext']}")
     if results and refs and cp.judge(results[0]['fitness'], refs) != "reads as English":
         print(f"{YELLOW}Not solved. Short texts give each key row few letters to judge; with known plaintext use "
-              f"option 3.{RESET}")
+              f"option 2.{RESET}")
 
 
 def main():

@@ -333,3 +333,65 @@ The Gromark screen alone ranked the true primer only 129th-1,051st of 100,000. T
 ### 8.7 Tests
 
 `python -m unittest discover -s tests -t .` runs 64 tests: 28 from earlier stages, 12 for the analyzer, 16 for the audit fixes and 8 for the new solvers and C kernels. With the C library built, all 64 run (about 100 s). Without it, the 10 native tests (6 earlier, 4 new) are skipped.
+
+---
+
+## 9. Stage 5 (2026-11-27): every engine in C, compute settings, menu v2.1
+
+Menu numbers in this section are the v2.1 numbers; sections 1-8 use the numbers of their time (the help screen, `H`, has the old-to-new table).
+
+### 9.1 C only, no Python fallback
+
+Every annealing, dictionary and large brute-force search now runs in C. The Python search loops they replaced were deleted, not kept as fallbacks. Small keyspaces still loop in Python around C scoring (Caesar, Affine, crib-drag offsets, the Vigenère Auto-Solver's per-column shift fit). Dead Python code found by a scan for unreferenced functions was deleted too: a pure-Python Vigenère solver in tool 21, `caesar.save_caesar_results` and `transposition_families.segment_sources`. Without the library, the solvers raise `native.NativeUnavailable` with the build instructions; the launcher offers the build at start-up and dims the tools that need it. The library is one file built from every `.c` file in `scripts/native/` (14 engines sharing `cct_common.h`), with `-O3 -march=native -ffp-contract=off`: no fused multiply-add, so C fitness values equal the Python definitions bit for bit.
+
+The port ran in five groups (periodic, layered, digraphic, keystream, screens). Each group's work was checked by an independent verifier and fixed until no serious issue was left. Measured before (the previous Python engine) and after (C), on a 20-thread machine with other jobs running, so the figures are rough:
+
+| Search | Before | After |
+|---|---|---|
+| Two-Layer Solver (61), substitution + width-8 transposition, 300,000 steps | 2.59 s | 1.23 s |
+| Substitution Solver (13), 1,058,000 steps | 5.82 s | 3.34 s |
+| Keyed Columnar (45), double annealing [8, 10], 300,000 steps | 4.19 s | 1.58 s |
+| Keyed Columnar (45), every order of width 10 | 16.1 s | 1.65 s |
+| Keyed Columnar (45), dictionary (390,418 words) | 5.47 s | 2.49 s |
+| Double columnar (45), 6x6 exhaustive | 10.1 s | 0.64 s |
+| Playfair annealing (51), 100,000 steps | 8.59 s | 0.44 s |
+| Playfair dictionary (51), 440,375 keywords | 19.0 s | 1.1-1.3 s |
+| Four-Square annealing (52), 200,000 steps | 4.95 s | 0.76 s |
+| Bifid period 7 (53), 200,000 steps | 6.50 s | 1.67 s |
+| Hill 3x3 row attack (54) | 1.45 s | 0.14 s |
+| Autokey (31) with a word list, 40 letters | 8.04 s | 0.11 s |
+| Autokey (31) without a word list, 200 letters, primers up to 20 | 5.84 s | 0.15 s |
+| Gromark Solver (34), 250 letters, full solve | 295 s | 16 s (10 workers) |
+| Word Pattern Attack (14) beam search | 0.07-0.27 s | 0.01-0.07 s |
+
+The periodic annealer (22-25) was already mostly C-scored and kept its speed (Vigenère, period 7, 2,000,000 steps: 1.6 s before and 1.7 s after); what changed is that it now also accepts any alphabet of 1-256 symbols (I/J-merged, with digits, keyed, Spanish) instead of refusing non-A-Z alphabets.
+
+Success rates of the C engines, 16 runs each on one planted 300-letter text: Playfair 6/16 at 1,000,000 steps, Four-Square 11/16 at 1,000,000, Bifid period 7 16/16 at 400,000, **Trifid period 7 0/16** at 400,000 (the former Python Trifid: 0/8; C at 4,000,000 steps: 0/8). Trifid remains unsolved by this toolkit.
+
+**Removed** (superseded, not ported):
+- Playfair: the memetic attack (9-15% of letters, section 8.3) and the two duplicate dictionary modes, now one C keyword attack.
+- Hill: the exhaustive 2x2 mode (the row attack returns the same keys).
+- Gromark (known key) (71): the genetic, annealing, hill-climbing, dictionary and key-length search modes; ciphertext-only attacks are tool 34.
+- Former tool 32 (Annealing: Transposition): merged into tool 44, Column-Order Solver, as "Moves: 2 = swap only"; the module `simulated_annealing_transposition.py` is deleted.
+- `annealing.anneal` and `annealing.hill_climb`; `annealing.py` keeps the shared definitions (`Fitness`, `Schedule`, `letter_entropy`, defaults).
+
+**Accepted design choices:** several searches run their C calls on threads (ctypes releases the GIL) instead of processes: the Gronsfeld exhaustive search, the shared dictionary attacks (`attack_support`), the Playfair dictionary attack, the Keyed Columnar exhaustive, dictionary and double searches, Autokey's word list, Quagmire and Routes & Irregular. Playfair annealing, Four-Square, Bifid / Trifid, the Two-Layer Solver, Gromark and the analyzer's hill-climb use processes; tool 45's annealing restarts run one after another. Measured on the full period-8 Gronsfeld search: 10 workers, threads 11.5 s and processes 10.9 s; period 7, threads 1.24 s and processes 2.80 s (process start-up dominates small searches).
+
+### 9.2 Compute settings (92, key `P`)
+
+On the first launch the toolkit shows the CPU, threads, free memory and GPUs and asks for a limit on worker processes; later launches show the saved limit in one line (Enter keeps it, `C` changes it and shows the hardware again). Presets: Light (a quarter of the threads), Balanced (half, the default), Heavy (all but two), or any number. Searches run at below-normal priority by default, inherited by worker processes. Every worker count in the toolkit goes through `compute.workers()`. Saved per machine in `cct_settings.json` (git-ignored).
+
+### 9.3 Menu v2.1
+
+Tools are grouped in attack order and numbered by tens (README, Features). After the analyzer runs, its recommended tools are marked with • and `N` steps through them; PgUp/PgDn jump between blocks; the footer shows the selected tool's old number ("was NN") when it fits. The analyzer's columnar hill-climb now starts at width 9, since widths 2-8 are searched exhaustively. The analyzer's pathways name tools by module, so the numbers they show always match the menu.
+
+### 9.4 Fixes
+
+- Menu 91 only said "run python -m pip install ziglang" when zig's compiler was missing from the Python running the toolkit (for example Python 3.14 when ziglang is installed in 3.15 only): it now names that Python and offers to install ziglang into it.
+- Rebuilding while a toolkit had the library loaded failed on Windows: the build now waits as `cct_native.dll.new` and is installed at the next start.
+- `SetPriorityClass` silently failed (64-bit process handle truncated by ctypes); fixed with explicit argument types and checked in worker processes.
+
+### 9.5 Open
+
+- Trifid: not solved (above).
+- Gromark Solver: the alphabet climb stalls in some runs (5 of 7 exact in one review; 2 stopped at the complementary key, 88-93% of letters); short texts such as tool 71's 78-letter test case are not solved.

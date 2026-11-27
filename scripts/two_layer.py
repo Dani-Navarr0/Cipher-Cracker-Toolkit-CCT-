@@ -1,5 +1,5 @@
 """Two-layer cipher solver: substitution, transposition and Vigenere-family
-layers in any two-layer combination, solved by joint simulated annealing.
+layers in any two-layer combination, solved by joint simulated annealing (in C: native/layered_engine.c).
 
 How it works: every layer has a key (a substitution alphabet, a column order,
 or a periodic shift key). One annealing search changes one layer's key per
@@ -45,6 +45,7 @@ COMBINATIONS = {
     '7': ("Substitution + Substitution", ("sub",), 300_000),
 }
 PERIODIC_VARIANTS = {'1': 'vigenere', '2': 'beaufort', '3': 'variant'}
+MAX_WIDTH, MAX_PERIOD = 64, 128          # limits of the C engine (native/layered_engine.c)
 
 
 # ---------------------------------------------------------------- building
@@ -67,20 +68,29 @@ def build_layers(job, length):
     return layers
 
 
-def solve_job(job):
-    """Run one annealing search. Module-level so worker processes can run it."""
-    random.seed(job['seed'])
+def _solver(job):
+    """The C-backed solver for one job (keys drawn from Python's random, which
+    solve_job seeds from the job)."""
     model = load_ngram_scores(job['ngram_path'])
     cipher = bytes(job['cipher'])
     layers = build_layers(job, len(cipher))
     fixed = cipher if all(layer.preserves_counts for layer in layers) else None
-    solver = LayeredSolver(cipher, layers, Fitness(model, job['entropy_weight'], fixed_letters=fixed))
+    return model, LayeredSolver(cipher, layers, Fitness(model, job['entropy_weight'], fixed_letters=fixed))
+
+
+def solve_job(job):
+    """Run one annealing search (in C). Module-level so worker processes can run it.
+    The reported score is annealing.Fitness of the plaintext (entropy from the
+    plaintext itself), the value cipher_profile.fitness_function() gives."""
+    random.seed(job['seed'])
+    model, solver = _solver(job)
     started = time.time()
     solver.anneal(Schedule(job['iterations']))
-    score = solver.polish()
+    solver.polish()
+    plaintext = solver.plaintext()
     return {
-        'score': score,
-        'plaintext': codes_to_text(solver.plaintext()),
+        'score': Fitness(model, job['entropy_weight'])(plaintext),
+        'plaintext': codes_to_text(plaintext),
         'keys': solver.describe(),
         'label': job['label'],
         'seconds': time.time() - started,
@@ -88,17 +98,8 @@ def solve_job(job):
 
 
 def measure_step_time(job) -> float:
-    """Seconds per annealing step for this job, measured on this machine."""
-    model = load_ngram_scores(job['ngram_path'])
-    cipher = bytes(job['cipher'])
-    layers = build_layers(job, len(cipher))
-    solver = LayeredSolver(cipher, layers, Fitness(model, job['entropy_weight']))
-    steps = 3000
-    started = time.perf_counter()
-    for _ in range(steps):
-        solver.propose()
-        solver.undo()
-    return (time.perf_counter() - started) / steps
+    """Seconds per annealing step for this job, measured on this machine (C engine)."""
+    return _solver(job)[1].seconds_per_step()
 
 
 # ---------------------------------------------------------------- input helpers
@@ -251,11 +252,16 @@ def configure(cipher, previous=None):
             which = f" #{position}" if kinds.count("trans") > 1 else ""
             widths = ask_int_range(f"Transposition{which} width(s)", 8)
             modes = ask_modes()
-            parameter_options.append([("trans", (w, m)) for w in widths for m in modes if 2 <= w < len(cipher)])
+            if any(w > MAX_WIDTH for w in widths):
+                print(f"{YELLOW}Widths above {MAX_WIDTH} are skipped (the C engine's limit).{RESET}")
+            parameter_options.append([("trans", (w, m)) for w in widths for m in modes
+                                      if 2 <= w < len(cipher) and w <= MAX_WIDTH])
         elif kind == "periodic":
             periods = ask_int_range("Period(s) of the Vigenere-family key", 7)
             variant = ask_variant()
-            parameter_options.append([("periodic", (p, variant)) for p in periods if p >= 1])
+            if any(p > MAX_PERIOD for p in periods):
+                print(f"{YELLOW}Periods above {MAX_PERIOD} are skipped (the C engine's limit).{RESET}")
+            parameter_options.append([("periodic", (p, variant)) for p in periods if 1 <= p <= MAX_PERIOD])
         else:
             parameter_options.append([("sub", None)])
     combos = [[]]
@@ -292,7 +298,8 @@ def execute(cipher, settings, ngram_path=DEFAULT_NGRAM_PATH, entropy_weight=0.5)
                 'seed': random.randrange(2 ** 32), 'label': describe_combo(combo),
             })
 
-    workers = max(1, min(len(jobs), (os.cpu_count() or 2) - 1))
+    import compute
+    workers = compute.workers(len(jobs))
     step_seconds = measure_step_time(jobs[0])
     total_seconds = step_seconds * settings['iterations'] * len(jobs) / workers
     print(f"\n{BLUE}{len(jobs)} runs{RESET} ({len(settings['combos'])} parameter combination(s) x {settings['restarts']}) of "
@@ -392,6 +399,8 @@ def run():
     """Interactive session: the ciphertext and results are kept between
     searches, so different layer combinations can be tried without leaving
     the module or pasting the ciphertext again."""
+    import native
+    native.require()            # the search runs in C
     banner("Two-Layer Solver", "Substitution / transposition / Vigenere stacks, solved jointly")
     cipher, settings, results = None, None, []
 

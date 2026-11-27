@@ -1,9 +1,10 @@
 import os
 import datetime
-import heapq
 import re
 from utils import utils
+import attack_support
 from ngram_scoring import load_ngram_scores, score_text
+from native import periodic_engine
 
 KEEP_OUTSIDE_WINDOW = 25
 
@@ -102,25 +103,56 @@ def print_colored_output(input_data, input_format, key, mod_result, alphabet_res
     if ioc is not None:
         print(f"{BLUE}IoC:{RESET} {ioc:.6f}")
 
-def brute_force_with_ioc(ciphertext, operation, modulus, base_index, custom_alphabet=None, min_ioc=0.065, max_ioc=0.07, perform_freq_analysis=False, freq_threshold=45.0):
-    """Try each word in the wordlist as a key, filter by IoC."""
+CHUNK_WORDS = 20_000               # words per C call (one thread each)
+MAX_MODULUS = 0x10FFFF - 64          # chr(65 + value) must exist for every value below the modulus
+
+
+def _modular_tables(ciphertext, operation, modulus, custom_alphabet, model):
+    """How the C engine sees this attack: the key value of each ASCII key
+    character (default: A-Z letters only, other characters ignored; custom
+    alphabet: its index, and a word with any other character is skipped), the
+    character each result value 0..modulus-1 is shown as (map_to_alphabet),
+    and, for words with no key letters (modular_operation then leaves the
+    message as it is), the cost/IoC/blankness of that unchanged text."""
+    if custom_alphabet:
+        keymap = [custom_alphabet.find(chr(code)) if chr(code) in custom_alphabet else -2 for code in range(128)]
+        characters = [custom_alphabet[value] if value < len(custom_alphabet) else ' ' for value in range(modulus)]
+    else:
+        keymap = [code - 65 if 65 <= code <= 90 else -1 for code in range(128)]
+        characters = [chr(65 + value) for value in range(modulus)]
     try:
-        if not os.path.exists(WORDLIST_PATH):
-            print(f"{RED}Error: '{WORDLIST_PATH}' not found in the current directory.{RESET}")
-            return []
-            
-        with open(WORDLIST_PATH, 'r', encoding='utf-8') as file:
-            words = [word.strip() for word in file if word.strip()]
+        text = map_to_alphabet(list(ciphertext), custom_alphabet)
+        identity = (score_text(text, model), utils.calculate_ioc(text), not text.strip())
+    except (ValueError, OverflowError):     # a value chr() cannot show: those words are skipped
+        identity = None
+    return periodic_engine.ModularTables(modulus, operation != 'add', keymap, characters, identity)
+
+
+def brute_force_with_ioc(ciphertext, operation, modulus, base_index, custom_alphabet=None, min_ioc=0.065, max_ioc=0.07, perform_freq_analysis=False, freq_threshold=45.0):
+    """Try each word in the wordlist as a key, filter by IoC.
+
+    The modular operation, the IoC and the n-gram cost of every word run in C
+    (cct_modular_dict); kept are the IoC-window hits and the
+    KEEP_OUTSIDE_WINDOW most English-like results outside it."""
+    if not os.path.exists(WORDLIST_PATH):
+        print(f"{RED}Error: '{WORDLIST_PATH}' not found in the current directory.{RESET}")
+        return []
+    if not 1 <= modulus <= MAX_MODULUS:
+        print(f"{RED}The modulus must be between 1 and {MAX_MODULUS:,}.{RESET}")
+        return []
+    try:
+        words, keys = attack_support.read_ascii_keys(WORDLIST_PATH)
     except Exception as e:
         print(f"{RED}Error reading wordlist: {e}{RESET}")
         return []
-    
-    results = []
-    outside, costs = [], {}
+
+    custom_alphabet = custom_alphabet or None
     model = load_ngram_scores()
     total_words = len(words)
+    tables = _modular_tables(ciphertext, operation, modulus, custom_alphabet, model)
+    message = [-1 if value == -1 else value % modulus for value in ciphertext]
 
-    print(f"\n{YELLOW}Starting brute force with {total_words} words...{RESET}")
+    print(f"\n{YELLOW}Starting brute force with {total_words} words (C engine)...{RESET}")
     print(f"\n-{GREY}IoC filter range: {min_ioc} to {max_ioc} (plus the {KEEP_OUTSIDE_WINDOW} most English-like "
           f"results outside it; ranked by n-gram cost){RESET}")
     print(f"-{GREY}Modular {operation} with modulus {modulus} (Base index: {base_index}){RESET}")
@@ -128,55 +160,49 @@ def brute_force_with_ioc(ciphertext, operation, modulus, base_index, custom_alph
         print(f"-{GREY}Using custom alphabet: {custom_alphabet}{RESET}")
     if perform_freq_analysis:
         print(f"-{GREY}Frequency analysis will be performed (threshold: {freq_threshold}){RESET}")
-    
-    words_checked = 0
-    for word in words:
-        words_checked += 1
-        if words_checked % 1000 == 0:
-            print(f"{GREY}Progress: {RED}{words_checked}{RESET}/{YELLOW}{total_words}{RESET} words checked...{RESET}", end='\r')
-        
-        # Skip empty words or words with non-ASCII characters
-        if not word or not all(ord(c) < 128 for c in word):
-            continue
-            
-        # Try with uppercase version of the word
-        test_word = word.upper()
-        
-        # Convert key to numeric values if using custom alphabet
+
+    chunks = [(first, min(CHUNK_WORDS, total_words - first)) for first in range(0, total_words, CHUNK_WORDS)]
+    parts = attack_support.parallel_chunks(
+        lambda chunk: periodic_engine.modular_dict(message, tables, keys, chunk[0], chunk[1], model, min_ioc, max_ioc,
+                                                   KEEP_OUTSIDE_WINDOW),
+        chunks, lambda done, total: print(f"{GREY}Progress: {RED}{done}{RESET}/{YELLOW}{total}{RESET} parts "
+                                          f"checked...{RESET}", end='\r'))
+    window, outside, checked = [], [], 0
+    for (first, count), part in zip(chunks, parts):
+        if part is not None:
+            window += part[0]
+            outside += part[1]
+            checked += count
+    window.sort()
+    # The most English-like outside the window over all chunks (later word wins a tie, as before).
+    outside = sorted(outside, key=lambda row: (row[1], -row[0]))[:KEEP_OUTSIDE_WINDOW]
+    outside.sort(key=lambda row: (row[1], row[0]))
+
+    print(f"{GREY}Completed! {checked} words checked.{RESET}                ")
+
+    def text_for(test_word):
         if custom_alphabet:
-            key_values = [custom_alphabet.find(c) if c in custom_alphabet else -1 for c in test_word]
-            # Skip if any character in the key is not in the custom alphabet
-            if -1 in key_values:
-                continue
-            mod_result = modular_operation(ciphertext, key_values, operation, modulus, base_index)
+            key = [custom_alphabet.find(c) for c in test_word]
         else:
-            mod_result = modular_operation(ciphertext, test_word, operation, modulus, base_index)
-        
-        # Map result to alphabet
-        result_text = map_to_alphabet(mod_result, custom_alphabet, base_index)
-        
-        # Calculate IoC
-        ioc = utils.calculate_ioc(result_text)
-        cost = score_text(result_text, model)
+            key = test_word
+        return map_to_alphabet(modular_operation(ciphertext, key, operation, modulus, base_index), custom_alphabet,
+                               base_index)
+
+    results, costs = [], {}
+    for index, cost, ioc in window:
+        test_word = words[index]
         costs[test_word] = cost
-
-        # Check if result matches IoC criteria
-        if min_ioc <= ioc <= max_ioc and len(result_text.strip()) > 0:
-            if perform_freq_analysis:
-                freq_analysis, likeness_score = utils.analyze_frequency(result_text)
-                if likeness_score <= freq_threshold:
-                    results.append((test_word, "Modular", result_text, ioc, freq_analysis, likeness_score))
-            else:
-                results.append((test_word, "Modular", result_text, ioc, "", float('inf')))
+        result_text = text_for(test_word)
+        if perform_freq_analysis:
+            freq_analysis, likeness_score = utils.analyze_frequency(result_text)
+            if likeness_score <= freq_threshold:
+                results.append((test_word, "Modular", result_text, ioc, freq_analysis, likeness_score))
         else:
-            # English text often falls outside a narrow IoC window: keep the best
-            # n-gram candidates regardless, so the right key is not discarded.
-            heapq.heappush(outside, (-cost, words_checked, (test_word, "Modular", result_text, ioc, "", float('inf'))))
-            if len(outside) > KEEP_OUTSIDE_WINDOW:
-                heapq.heappop(outside)
-
-    print(f"{GREY}Completed! {total_words} words checked.{RESET}                ")
-    results += [entry for _, _, entry in outside]
+            results.append((test_word, "Modular", result_text, ioc, "", float('inf')))
+    for index, cost, ioc in outside:
+        test_word = words[index]
+        costs[test_word] = cost
+        results.append((test_word, "Modular", text_for(test_word), ioc, "", float('inf')))
 
     # Frequency-analysis score first if requested, then n-gram cost (lower = more English).
     if perform_freq_analysis:

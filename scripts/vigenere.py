@@ -1,28 +1,24 @@
-from concurrent.futures import ProcessPoolExecutor, as_completed
-from typing import List, Dict, Tuple, Optional
-import time
+from typing import List, Dict, Tuple
 from functools import lru_cache
-import os
-import random
 import math
+import os
+import time
 import re
 from pathlib import Path
-from collections import Counter
 from utils.utils import get_input_ciphertexts
 import attack_support
+from annealing import Schedule
+from periodic_solver import CANNOT_START, solve_periodic
 from ngram_scoring import (
     DEFAULT_NGRAM_PATH,
-    DEFAULT_NGRAM_SIZE,
     NGRAM_DIRECTORY,
     _NGRAM_FILES,
     add_spaces,
     available_spacing_models,
     load_spacing_model,
     load_ngram_scores,
-    ngram_total,
     resolve_ngram_path,
     score_text,
-    text_to_codes,
 )
 
 # --- KASISKI IMPORT ---
@@ -179,51 +175,6 @@ def select_spacing_model_path(ngram_path_input: Path) -> Path:
         print(f"{YELLOW}Choose a number from 1 to {len(models)}.{RESET}")
 
 
-def calculate_fitness(text: str, ngram_model, ent_weight: float) -> float:
-    return codes_fitness(text_to_codes(text), ngram_model.scores, ngram_model.size, ent_weight)
-
-
-def codes_fitness(letters: bytes, scores, ngram_size: int, ent_weight: float) -> float:
-    """calculate_fitness for text already reduced to 0-25 letter codes."""
-    al = len(letters) - ngram_size + 1
-    if al <= 0:
-        return 0.0
-    total = len(letters)
-    entropy = 0.0
-    for count in Counter(letters).values():
-        p = count / total
-        entropy += abs(math.log2(p) * p)
-    return (ngram_total(letters, scores, ngram_size) / al) * (entropy ** ent_weight)
-
-
-def make_column_decryptor(ciphertext: str, key_length: int, alphabet_str: str):
-    """Fast Vigenere decryption to letter codes, one key column at a time.
-
-    Returns ``(column_bytes, shift_tables)`` or None when the alphabet is not a
-    permutation of A-Z (custom alphabets then use the general slow path).
-    Column j holds the ciphertext symbols that key letter j decrypts (key
-    position advances only on alphabet symbols, as in decrypt_vigenere), and
-    ``shift_tables[s]`` maps a symbol index to the A-Z code it decrypts to.
-    """
-    alphabet, alphabet_dict = get_alphabet(alphabet_str)
-    if sorted(alphabet) != [chr(65 + i) for i in range(26)]:
-        return None
-    symbols = []
-    for char in ciphertext:
-        char_upper = char.upper()
-        if char_upper in alphabet_dict:
-            symbols.append(alphabet_dict[char_upper])
-        elif text_to_codes(char):
-            return None  # e.g. 'ß' -> 'SS': would be scored but not decrypted.
-    symbols = bytes(symbols)
-    columns = [symbols[j::key_length] for j in range(key_length)]
-    plain_codes = [ord(char) - 65 for char in alphabet]
-    shift_tables = [
-        bytes(plain_codes[(index - shift) % 26] for index in range(26)) + bytes(230)
-        for shift in range(26)
-    ]
-    return columns, shift_tables
-
 # --- VIGENERE CORE FUNCTIONS ---
 
 @lru_cache(maxsize=None)
@@ -251,6 +202,15 @@ def decrypt_vigenere(ciphertext: str, key: str, alphabet_str: str) -> str:
             plaintext.append(char.lower())
     return ''.join(plaintext)
 
+
+def vigenere_rule(c: int, k: int, m: int) -> int:
+    """Vigenere decryption for alphabet indices (same maths as decrypt_vigenere)."""
+    return (c - k) % m
+
+
+# The dictionary attack runs decrypt_vigenere's rule in C (attack_support).
+attack_support.register_kernel(decrypt_vigenere, vigenere_rule)
+
 load_dictionary = attack_support.load_dictionary
 contains_all_phrases = attack_support.contains_all_phrases
 
@@ -263,15 +223,6 @@ def highlight_phrases(text: str, phrases: List[str]) -> str:
     return highlighted_text
 
 # --- ATTACK FUNCTIONS ---
-
-def process_batch(args: Tuple) -> List[Dict]:
-    word_batch, ciphertext, target_phrases, alphabet_str, expected_freqs, min_ioc, max_ioc = args
-    return attack_support.score_batch(
-        (decrypt_vigenere, word_batch, ciphertext, alphabet_str, target_phrases, expected_freqs, min_ioc, max_ioc)
-    )
-
-def batch_words(words: List[str], batch_size: int = 500) -> List[List[str]]:
-    return [words[i:i + batch_size] for i in range(0, len(words), batch_size)]
 
 def run_dictionary_attack(ciphertext: str, alphabet_str: str, expected_freqs: Dict, config: Dict):
     target_phrases = config.get('target_phrases', [])
@@ -325,113 +276,24 @@ def run_dictionary_attack(ciphertext: str, alphabet_str: str, expected_freqs: Di
     return filtered_results
 
 
-def modify_vigenere_key(key: str, alphabet: str) -> str:
-    key_list = list(key)
-    idx = random.randrange(len(key_list))
-    current_char = key_list[idx]
-    if len(alphabet) > 1:
-        choices = [c for c in alphabet if c != current_char]
-        key_list[idx] = random.choice(choices) if choices else random.choice(alphabet)
-    else:
-        key_list[idx] = random.choice(alphabet)
-    return "".join(key_list)
-
-
-def run_simulated_annealing_pass(
-    ciphertext: str,
-    alphabet_str: str,
-    key_length: int,
-    ngram_model,
-    starting_temp: float,
-    cooling_rate: float,
-    steps_per_temp: int,
-    ent_weight: float,
-) -> Tuple[str, float, str]:
-    alphabet, alphabet_dict = get_alphabet(alphabet_str)
-    current_key = "".join(random.choice(alphabet) for _ in range(key_length))
-
-    fast = make_column_decryptor(ciphertext, key_length, alphabet_str) if len(alphabet) > 1 else None
-    if fast is None:
-        # General path (custom alphabets): full decrypt + rescore per step.
-        def propose(key):
-            new_key = modify_vigenere_key(key, alphabet)
-            return new_key, calculate_fitness(decrypt_vigenere(ciphertext, new_key, alphabet_str), ngram_model, ent_weight)
-        def revert():
-            pass
-        current_score = calculate_fitness(decrypt_vigenere(ciphertext, current_key, alphabet_str), ngram_model, ent_weight)
-    else:
-        # Only one key letter changes per step, so only that column of the
-        # plaintext is re-decrypted (a C-level translate + slice assignment).
-        columns, shift_tables = fast
-        scores, ngram_size = ngram_model.scores, ngram_model.size
-        plain = bytearray(sum(len(column) for column in columns))
-        for j, char in enumerate(current_key):
-            plain[j::key_length] = columns[j].translate(shift_tables[alphabet_dict[char]])
-        # Precomputed per-letter choices reproduce modify_vigenere_key's
-        # random.choice calls exactly (same list, same order).
-        other_letters = {char: [c for c in alphabet if c != char] for char in alphabet}
-        randrange, choice = random.randrange, random.choice
-        undo = []
-
-        def propose(key):
-            idx = randrange(key_length)
-            old_char = key[idx]
-            new_char = choice(other_letters[old_char]) if other_letters[old_char] else choice(alphabet)
-            plain[idx::key_length] = columns[idx].translate(shift_tables[alphabet_dict[new_char]])
-            undo[:] = [idx, old_char]
-            return key[:idx] + new_char + key[idx + 1:], codes_fitness(plain, scores, ngram_size, ent_weight)
-
-        def revert():
-            idx, old_char = undo
-            plain[idx::key_length] = columns[idx].translate(shift_tables[alphabet_dict[old_char]])
-
-        current_score = codes_fitness(plain, scores, ngram_size, ent_weight)
-
-    best_key = current_key
-    best_score = current_score
-
-    temp = starting_temp
-    iteration = 0
-    start_time = time.time()
-    rand, exp = random.random, math.exp
-
-    try:
-        while temp > 0.1:
-            for _ in range(steps_per_temp):
-                new_key, new_score = propose(current_key)
-
-                score_diff = new_score - current_score
-
-                if score_diff > 0:
-                    current_key = new_key
-                    current_score = new_score
-
-                    if new_score > best_score:
-                        best_score = new_score
-                        best_key = new_key
-
-                elif temp > 0 and rand() < exp(score_diff / temp):
-                    current_key = new_key
-                    current_score = new_score
-                else:
-                    revert()
-            
-            temp *= cooling_rate
-            iteration += 1
-            
-            if iteration % 10 == 0:
-                best_text_sample = decrypt_vigenere(ciphertext, best_key, alphabet_str).replace('\n', ' ')[:40]
-                print(f"Temp: {temp:>5.2f} | Best Score: {GREEN}{best_score:>8.2f}{RESET} | Text: {best_text_sample}...", end='\r')
-    except KeyboardInterrupt:
-        print("\nPass manually interrupted.")
-
-    time_taken = time.time() - start_time
-    best_text = decrypt_vigenere(ciphertext, best_key, alphabet_str)
-    print(f"\n{GREEN}Pass Complete in {time_taken:.2f}s! Best Score: {best_score:.2f}{RESET}")
-    return best_key, best_score, best_text
+def schedule_from_levels(starting_temp: float, cooling_rate: float, steps_per_temp: int) -> Schedule:
+    """The tool's (starting temperature, cooling rate, steps per temperature)
+    as the shared geometric schedule: the same number of moves the old
+    level-by-level loop made (steps_per_temp x the levels needed to cool from
+    starting_temp to 0.1), cooling from starting_temp to 0.1 over them."""
+    if not 0.0 < cooling_rate < 1.0:
+        raise ValueError("the cooling rate must be between 0 and 1")
+    if starting_temp <= 0.1:
+        raise ValueError("the starting temperature must be above 0.1")
+    if steps_per_temp < 1:
+        raise ValueError("steps per temperature must be at least 1")
+    levels = max(1, math.ceil(math.log(0.1 / starting_temp) / math.log(cooling_rate)))
+    return Schedule(steps_per_temp * levels, starting_temp, 0.1)
 
 
 def run_simulated_annealing_attack(ciphertext: str, alphabet_str: str, expected_freqs_default: Dict, config: Dict):
+    """Anneal the key with the shared C engine (periodic_solver.solve_periodic),
+    one pass per run and key length."""
     min_kl = config.get('min_key_length', 5)
     max_kl = config.get('max_key_length', 5)
     starting_temp = config.get('starting_temp', 20.0)
@@ -450,7 +312,19 @@ def run_simulated_annealing_attack(ciphertext: str, alphabet_str: str, expected_
     else:
         ngram_model = selected_ngram_path
 
-    print(f"{GREY}Key Range: {min_kl}-{max_kl} | Starting Temp: {starting_temp} | Cooling Rate: {cooling_rate} | Steps/Temp: {steps_per_temp} | Passes/Len: {runs} | Ent Weight: {ent_weight}{RESET}\n")
+    try:
+        schedule = schedule_from_levels(starting_temp, cooling_rate, steps_per_temp)
+    except ValueError as error:
+        print(f"{RED}Invalid annealing settings: {error}.{RESET}")
+        return []
+    print(f"{GREY}Key Range: {min_kl}-{max_kl} | Starting Temp: {starting_temp} | Cooling Rate: {cooling_rate} | Steps/Temp: {steps_per_temp} | Passes/Len: {runs} | Ent Weight: {ent_weight}{RESET}")
+    print(f"{GREY}= {schedule.iterations:,} moves per pass, cooling {starting_temp} -> 0.1 (C engine){RESET}\n")
+    alphabet, _ = get_alphabet(alphabet_str)
+
+    def report(step, temperature, best, best_key):
+        key = "".join(alphabet[k] for k in best_key)
+        sample = decrypt_vigenere(ciphertext, key, alphabet_str).replace('\n', ' ')[:40]
+        print(f"Temp: {temperature:>5.2f} | Best Score: {GREEN}{best:>8.2f}{RESET} | Text: {sample}...", end='\r')
 
     overall_best_key = ""
     overall_best_score = float('-inf')
@@ -461,13 +335,19 @@ def run_simulated_annealing_attack(ciphertext: str, alphabet_str: str, expected_
     for kl in range(min_kl, max_kl + 1):
         if min_kl != max_kl:
             print(f"\n{CYAN}================ KEY LENGTH {kl} (Range: {min_kl}-{max_kl}) ================{RESET}")
-        
+
         for i in range(runs):
             print(f"\n{YELLOW}--- KEY LENGTH {kl} | PASS {i+1} OF {runs} ---{RESET}")
-            key, score, text = run_simulated_annealing_pass(
-                ciphertext, alphabet_str, kl, ngram_model, starting_temp, cooling_rate, steps_per_temp, ent_weight
-            )
-            
+            start_time = time.time()
+            results = solve_periodic(ciphertext, alphabet, alphabet, kl, vigenere_rule, ngram_model, schedule,
+                                     entropy_weight=ent_weight, report=report)
+            if results is None:
+                print(f"{RED}{CANNOT_START}{RESET}")
+                return []
+            key, score, _ = results[0]
+            text = decrypt_vigenere(ciphertext, key, alphabet_str)
+            print(f"\n{GREEN}Pass Complete in {time.time() - start_time:.2f}s! Best Score: {score:.2f}{RESET}")
+
             all_pass_results.append({'key': key, 'score': score, 'text': text, 'key_length': kl})
 
             if score > overall_best_score:

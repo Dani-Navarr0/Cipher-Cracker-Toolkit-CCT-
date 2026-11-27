@@ -55,78 +55,103 @@ def chi(counts, total):
     return sum((counts[p] - EXPECTED[p] * total) ** 2 / (EXPECTED[p] * total) for p in range(26))
 
 
+def _shifts_kernel():
+    import ctypes
+    import native
+    i32 = ctypes.c_int32
+    return native.function("cct_keyed_periodic_shifts", None,
+                           [ctypes.POINTER(i32), i32, ctypes.c_char_p, i32, i32, ctypes.POINTER(ctypes.c_double),
+                            ctypes.POINTER(i32)])
+
+
+def column_counts(codes, period):
+    """Cipher-letter counts of every column (period lists of 26)."""
+    return [[codes[column::period].count(c) for c in range(26)] for column in range(period)]
+
+
 def solve_alphabet(codes, period, alphabet, mode, variant):
-    """Best key for one alphabet: (plaintext codes, key letters)."""
+    """Best key for one alphabet: (plaintext codes, key letters). Each column's
+    shift is the one whose decryption is closest to English letter frequencies
+    (chi-squared, chosen in C: cct_keyed_periodic_shifts); then one decryption."""
+    import ctypes
     pa = alphabet if mode in (1, 3) else ALPHABET
     ca = alphabet if mode in (2, 3) else ALPHABET
     ct_pos = [ca.index(ALPHABET[c]) for c in range(26)]
     pt_letter = [ord(ch) - 65 for ch in pa]
+    counts = (ctypes.c_int32 * (26 * period))(*[x for column in column_counts(codes, period) for x in column])
+    shifts = (ctypes.c_int32 * period)()
+    _shifts_kernel()(counts, period, bytes(ord(ch) - 65 for ch in alphabet), mode, variant,
+                     (ctypes.c_double * 26)(*EXPECTED), shifts)
     plain = bytearray(len(codes))
     key = []
-    for column in range(period):
-        letters = codes[column::period]
-        best = None
-        for k in range(26):
-            if variant == 0:
-                table = bytes(pt_letter[(ct_pos[c] - k) % 26] for c in range(26)) + bytes(230)
-            else:
-                table = bytes(pt_letter[(k - ct_pos[c]) % 26] for c in range(26)) + bytes(230)
-            decrypted = letters.translate(table)
-            score = chi([decrypted.count(p) for p in range(26)], len(decrypted))
-            if best is None or score < best[0]:
-                best = (score, k, decrypted)
-        key.append(ca[best[1]])
-        plain[column::period] = best[2]
+    for column, k in enumerate(shifts):
+        if variant == 0:
+            table = bytes(pt_letter[(ct_pos[c] - k) % 26] for c in range(26)) + bytes(230)
+        else:
+            table = bytes(pt_letter[(k - ct_pos[c]) % 26] for c in range(26)) + bytes(230)
+        plain[column::period] = codes[column::period].translate(table)
+        key.append(ca[k])
     return bytes(plain), "".join(key)
 
 
-def _chi_chunk(args):
-    """Every (mode, variant) for one slice of alphabets: {(mode, variant): scores}."""
-    from native import fast
-    counts, period, packed, combos = args
-    return {combo: fast.keyed_periodic_chi(counts, period, packed, combo[0], combo[1], EXPECTED) for combo in combos}
-
-
-def _parallel_chi(counts, period, packed, combos):
-    """C kernel over all alphabets and combos, split across processes (one
-    pool) for long lists. Returns {(mode, variant): scores} or None."""
+def _best_kernel():
+    import ctypes
     import native
-    if not native.available():
-        return None
-    workers = max(1, (os.cpu_count() or 2) - 1)
-    if len(packed) < 20_000 or workers == 1:
-        return _chi_chunk((counts, period, packed, combos))
-    from concurrent.futures import ProcessPoolExecutor
-    size = -(-len(packed) // workers)
-    chunks = [(counts, period, packed[i:i + size], combos) for i in range(0, len(packed), size)]
-    with ProcessPoolExecutor(max_workers=workers) as pool:
-        parts = list(pool.map(_chi_chunk, chunks))
-    return {combo: [score for part in parts for score in part[combo]] for combo in combos}
+    i32, f64 = ctypes.c_int32, ctypes.c_double
+    return native.function("cct_keyed_periodic_best", i32,
+                           [ctypes.POINTER(i32), i32, ctypes.c_char_p, i32, i32, i32, i32, ctypes.POINTER(f64), i32,
+                            ctypes.POINTER(f64), ctypes.POINTER(i32)])
+
+
+_PACK = bytes.maketrans(ALPHABET.encode(), bytes(range(26)))
+
+
+def _best_chi(counts, period, packed, count, combos, keep):
+    """The ``keep`` lowest total chi-squared values of every (mode, variant) in
+    ``combos`` over ``count`` packed alphabets (26 letter codes each), from the C
+    kernel; long lists are split over threads (the C call releases the GIL).
+    Returns [(chi, alphabet index, mode, variant)], unsorted."""
+    import ctypes
+    from concurrent.futures import ThreadPoolExecutor
+    import native
+    native.require()
+    kernel = _best_kernel()
+    flat = (ctypes.c_int32 * (26 * period))(*[x for column in counts for x in column])
+    expected = (ctypes.c_double * 26)(*EXPECTED)
+    import compute
+    workers = compute.workers() if count >= 20_000 else 1
+    size = -(-count // workers) if count else 1
+
+    def job(task):
+        (mode, variant), start = task
+        part = packed[26 * start:26 * min(count, start + size)]
+        chi, index = (ctypes.c_double * keep)(), (ctypes.c_int32 * keep)()
+        kept = kernel(flat, period, part, len(part) // 26, start, mode, variant, expected, keep, chi, index)
+        if kept < 0:
+            raise MemoryError("keyed periodic search: out of memory")
+        return [(chi[j], index[j], mode, variant) for j in range(kept)]
+
+    tasks = [(combo, start) for combo in combos for start in range(0, count, size)]
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        return [entry for part in pool.map(job, tasks) for entry in part]
 
 
 def search(codes, period, alphabets, modes=(1, 2, 3), variants=(0, 1), keep=40, fitness=None):
-    """Rank every (alphabet, mode, variant) by letter frequencies (C kernel, or
-    Python for short lists), decrypt the best ``keep`` and rank by n-grams.
-    Returns [(fitness, word, mode, variant, key, plaintext text)]."""
-    from native import fast
+    """Rank every (alphabet, mode, variant) by letter frequencies (C kernel),
+    decrypt the best ``keep`` and rank by n-grams.
+    Returns [(fitness, word, mode, variant, key, plaintext text)].
+    Raises ValueError for a period outside 1..len(codes)."""
     import cipher_profile as cp
+    if not 1 <= period <= len(codes):
+        raise ValueError(f"Key length {period} is outside 1-{len(codes)} (the text length).")
+    if keep < 1:
+        return []
+    from ngram_scoring import codes_to_text
     fitness = fitness or cp.fitness_function()
     alphabet_list = list(alphabets)
-    packed = [bytes(ord(ch) - 65 for ch in a) for a in alphabet_list]
-    counts = [[codes[column::period].count(c) for c in range(26)] for column in range(period)]
-    ranked = []
+    packed = "".join(alphabet_list).encode("ascii").translate(_PACK)
     combos = [(mode, variant) for mode in modes for variant in variants]
-    native_scores = _parallel_chi(counts, period, packed, combos)
-    for mode in modes:
-        for variant in variants:
-            scores = native_scores[(mode, variant)] if native_scores else None
-            if scores is None:          # Python fallback (slow: keep the list short)
-                scores = []
-                for alphabet in alphabet_list:
-                    plain, _ = solve_alphabet(codes, period, alphabet, mode, variant)
-                    scores.append(chi([plain.count(p) for p in range(26)], len(plain)) * period)
-            ranked += [(score, i, mode, variant) for i, score in enumerate(scores)]
-    ranked.sort()
+    ranked = sorted(_best_chi(column_counts(codes, period), period, packed, len(alphabet_list), combos, keep))
     results, seen = [], set()
     for score, i, mode, variant in ranked[:keep]:
         alphabet = alphabet_list[i]
@@ -134,7 +159,6 @@ def search(codes, period, alphabets, modes=(1, 2, 3), variants=(0, 1), keep=40, 
         if plain in seen:
             continue
         seen.add(plain)
-        from ngram_scoring import codes_to_text
         results.append((fitness(plain), alphabets[alphabet], mode, variant, key, codes_to_text(plain)))
     results.sort(key=lambda r: -r[0])
     return results
@@ -144,6 +168,7 @@ def run():
     import native
     import cipher_profile as cp
     from ngram_scoring import text_to_codes
+    native.require()
     banner("Quagmire / Keyword-Alphabet Periodic", "Every dictionary word as the alphabet keyword, Quagmire I-III")
     codes = text_to_codes(input(f"{GREY}Enter ciphertext: {RESET}"))
     if len(codes) < cp.MIN_LETTERS:
@@ -162,15 +187,16 @@ def run():
     if not periods:
         print(f"{RED}No key length.{RESET}")
         return
-    option(1, "Dictionary words + Kryptos/story words", "(default; needs the C engines for speed)")
-    option(2, "Only Kryptos/story words", "(fast in Python)")
+    if not all(1 <= period <= len(codes) for period in periods):
+        print(f"{RED}Key lengths must be 1-{len(codes)} (the number of letters).{RESET}")
+        return
+    option(1, "Dictionary words + Kryptos/story words", "(default)")
+    option(2, "Only Kryptos/story words", "(instant)")
     option(3, "My own keywords")
     choice = input("Select (Enter = 1): ").strip() or "1"
     if choice == "3":
         words = [w.strip().upper() for w in input("Keywords (comma-separated): ").split(",") if w.strip()]
-    elif choice == "2" or not native.available():
-        if choice == "1":
-            print(f"{YELLOW}C engines not built (menu 45): using the short list only.{RESET}")
+    elif choice == "2":
         words = STORY_WORDS
     else:
         words = load_words()
