@@ -1,361 +1,229 @@
+"""Autokey (autoclave) cipher: decrypt, encrypt, and attacks that need no
+word list.
+
+Two kinds of autokey, each with a Vigenere or Beaufort tableau:
+
+* Plaintext autokey: the key is the primer followed by the plaintext.
+* Ciphertext autokey: the key is the primer followed by the ciphertext.
+
+Why the primer-free attacks work:
+
+* Ciphertext autokey: after the first L letters every key letter is a
+  ciphertext letter, which is public. So for each primer length L
+  everything after position L decrypts with no search at all; only the
+  first L letters (the primer's) are then fitted.
+* Plaintext autokey: plaintext position i depends only on plaintext
+  position i - L, so the text splits into L independent chains
+  (positions j, j+L, j+2L, ...), each fixed by ONE primer letter: 26
+  choices per chain. Each chain is fitted by letter frequencies, then all
+  chains together are hill-climbed on n-gram fitness.
+"""
 import os
-import argparse
-from utils import utils
 
-# ANSI color codes for terminal output
-from theme import RED, GREEN, YELLOW, BLUE, CYAN, GREY, WHITE, RESET, banner
+from theme import BOLD, CYAN, GREEN, GREY, RED, RESET, YELLOW, banner, option
 
-# Hardcoded path for words_alpha.txt
+ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 WORDLIST_PATH = os.path.join(os.path.dirname(__file__), "data", "words_alpha.txt")
+VARIANTS = ("vigenere", "beaufort")
+KINDS = ("plaintext", "ciphertext")
 
-def create_tabula_recta(alphabet):
-    """Create a tabula recta based on the provided alphabet."""
-    tabula = {}
-    for i, row_char in enumerate(alphabet):
-        tabula[row_char] = {}
-        for j, col_char in enumerate(alphabet):
-            # Calculate the index of the character in the alphabet
-            idx = (i + j) % len(alphabet)
-            tabula[row_char][col_char] = alphabet[idx]
-    return tabula
 
-def decrypt_autokey(ciphertext, primer, alphabet, tabula_recta):
-    """Decrypt Autokey cipher with the given primer."""
-    key = primer
-    plaintext = ""
-    
-    for i, char in enumerate(ciphertext):
-        if char not in alphabet:
-            plaintext += char
-            continue
-            
-        # Find the column in tabula recta where ciphertext char appears in the row corresponding to current key char
-        if i < len(key):
-            key_char = key[i]
+# ------------------------------------------------------------------ cipher (codes 0-25)
+
+def decrypt_codes(cipher, primer, kind="plaintext", variant="vigenere"):
+    """``cipher`` and ``primer``: sequences of 0-25. Returns a bytearray."""
+    L = len(primer)
+    plain = bytearray(len(cipher))
+    for i, c in enumerate(cipher):
+        if i < L:
+            k = primer[i]
         else:
-            key_char = plaintext[i - len(key)]
-            
-        if key_char not in alphabet:
-            continue
-            
-        # Find the plaintext character
-        for col_char in alphabet:
-            if tabula_recta[key_char][col_char] == char:
-                plaintext += col_char
-                break
-    
-    return plaintext
+            k = plain[i - L] if kind == "plaintext" else cipher[i - L]
+        plain[i] = (c - k) % 26 if variant == "vigenere" else (k - c) % 26
+    return plain
 
-def contains_fragment(plaintext, fragment, case_sensitive=False):
-    """Check if plaintext contains the specified fragment."""
-    if not case_sensitive:
-        return fragment.lower() in plaintext.lower()
-    return fragment in plaintext
 
-def brute_force_autokey(ciphertext, alphabet, min_ioc=0.065, max_ioc=0.07, 
-                        known_fragments=None, perform_freq_analysis=False, 
-                        freq_threshold=45.0):
-    """Try each word in the wordlist as a primer, filter by IoC and known fragments."""
-    try:
-        if not os.path.exists(WORDLIST_PATH):
-            print(f"{RED}Error: '{WORDLIST_PATH}' not found in the current directory.{RESET}")
-            return []
-            
-        with open(WORDLIST_PATH, 'r', encoding='utf-8') as file:
-            words = [word.strip() for word in file if word.strip()]
-    except Exception as e:
-        print(f"{RED}Error reading wordlist: {e}{RESET}")
-        return []
-    
+def encrypt_codes(plain, primer, kind="plaintext", variant="vigenere"):
+    L = len(primer)
+    cipher = bytearray(len(plain))
+    for i, p in enumerate(plain):
+        if i < L:
+            k = primer[i]
+        else:
+            k = plain[i - L] if kind == "plaintext" else cipher[i - L]
+        cipher[i] = (p + k) % 26 if variant == "vigenere" else (k - p) % 26
+    return cipher
+
+
+def to_codes(text):
+    return bytes(ord(ch) - 65 for ch in text.upper() if "A" <= ch <= "Z")
+
+
+def to_text(codes):
+    return "".join(ALPHABET[c] for c in codes)
+
+
+def decrypt_autokey(ciphertext, primer, kind="plaintext", variant="vigenere"):
+    """Text interface: letters A-Z only (other characters are dropped)."""
+    return to_text(decrypt_codes(to_codes(ciphertext), to_codes(primer), kind, variant))
+
+
+# ------------------------------------------------------------------ primer-free attack
+
+ENGLISH = [8.12, 1.49, 2.71, 4.32, 12.02, 2.30, 2.03, 5.92, 7.31, 0.10, 0.69, 3.98, 2.61,
+           6.95, 7.68, 1.82, 0.11, 6.02, 6.28, 9.10, 2.88, 1.11, 2.09, 0.17, 2.11, 0.07]
+
+
+def _chi(letters):
+    total = len(letters) or 1
+    return sum((letters.count(c) - ENGLISH[c] * total / 100) ** 2 / (ENGLISH[c] * total / 100) for c in range(26))
+
+
+def solve_primer(cipher, length, kind, variant, fitness, rounds=6):
+    """Best primer of ``length`` for one autokey kind and tableau.
+    Returns (fitness, primer codes, plaintext codes)."""
+    n = len(cipher)
+    primer = [0] * length
+    # Start: each chain's primer letter chosen by English letter frequencies.
+    for j in range(length):
+        best = None
+        for s in range(26):
+            primer[j] = s
+            chain = decrypt_codes(cipher, primer, kind, variant)[j::length]
+            score = _chi(chain)
+            if best is None or score < best[0]:
+                best = (score, s)
+        primer[j] = best[1]
+    plain = decrypt_codes(cipher, primer, kind, variant)
+    score = fitness(plain) if n > 5 else 0.0
+    for _ in range(rounds):
+        improved = False
+        for j in range(length):
+            keep = primer[j]
+            for s in range(26):
+                if s == keep:
+                    continue
+                primer[j] = s
+                trial = decrypt_codes(cipher, primer, kind, variant)
+                trial_score = fitness(trial)
+                if trial_score > score + 1e-9:
+                    score, plain, keep, improved = trial_score, trial, s, True
+            primer[j] = keep
+        if not improved:
+            break
+    return score, list(primer), plain
+
+
+def attack(cipher, max_length, fitness, kinds=KINDS, variants=VARIANTS, report=None):
+    """Every primer length 1..max_length for every kind and tableau, best first.
+    Each entry: (fitness, kind, variant, primer codes, plaintext codes)."""
     results = []
-    total_words = len(words)
-    
-    # Create the tabula recta
-    tabula_recta = create_tabula_recta(alphabet)
-    
-    print(f"\n{YELLOW}Starting brute force with {total_words} words...{RESET}")
-    print(f"\n-{GREY}IoC filter range: {min_ioc} to {max_ioc}{RESET}")
-    if perform_freq_analysis:
-        print(f"-{GREY}Frequency analysis will be performed (threshold: {freq_threshold}){RESET}")
-    if known_fragments:
-        print(f"-{GREY}Known fragments will be checked: {known_fragments}{RESET}")
-    
-    # Add case testing based on alphabet case
-    is_upper = alphabet[0].isupper()
-    case_transform = str.upper if is_upper else str.lower
-    print(f"{YELLOW}Testing {'uppercase' if is_upper else 'lowercase'} versions of each word to match alphabet{RESET}")
-    
-    words_checked = 0
-    for word in words:
-        words_checked += 1
-        if words_checked % 1000 == 0:
-            print(f"{GREY}Progress: {RED}{words_checked}{RESET}/{YELLOW}{total_words}{RESET} words checked...{RESET}", end='\r')
-        
-        # Skip empty words or words with characters not in alphabet
-        if not word or not all(case_transform(c) in alphabet for c in word if c.isalpha()):
-            continue
-        
-        # Try the word as primer in proper case
-        primer = case_transform(word)
-        
-        try:
-            # Decrypt with the primer
-            plaintext = decrypt_autokey(ciphertext, primer, alphabet, tabula_recta)
-            # Calculate IoC
-            ioc = utils.calculate_ioc(plaintext)
-            
-            # Check against known fragments
-            if known_fragments:
-                fragment_match = any(contains_fragment(plaintext, fragment) for fragment in known_fragments)
-            else:
-                fragment_match = False  # No fragments: rely on the IoC / frequency filters
-            
-            # Check IoC range
-            ioc_match = min_ioc <= ioc <= max_ioc
-            
-            if ioc_match or fragment_match:
-                if perform_freq_analysis:
-                    freq_analysis, likeness_score = utils.analyze_frequency(plaintext)
-                    if likeness_score <= freq_threshold:
-                        results.append((primer, plaintext, ioc, freq_analysis, likeness_score))
-                else:
-                    results.append((primer, plaintext, ioc, "", float('inf')))
-        except Exception as e:
-            # Skip errors for individual words
-            continue
-    
-    print(f"{GREY}Completed! {total_words} words checked.{RESET}                ")
-    
-    # Sort results - first by fragment match, then by frequency analysis score if available, then by IoC
-    if perform_freq_analysis:
-        results.sort(key=lambda x: (x[4], -x[2]))  # Sort by likeness score, then by IoC (descending)
-    else:
-        results.sort(key=lambda x: x[2], reverse=True)  # Sort by IoC
-        
+    for length in range(1, max_length + 1):
+        for kind in kinds:
+            for variant in variants:
+                score, primer, plain = solve_primer(cipher, length, kind, variant, fitness)
+                results.append((score, kind, variant, primer, plain))
+        if report:
+            report(length)
+    results.sort(key=lambda result: -result[0])
     return results
 
-def normalize_input(text, alphabet):
-    """Normalize input text to match the alphabet."""
-    result = ""
-    for c in text:
-        if c.upper() in alphabet.upper():
-            # Match case with alphabet
-            if alphabet[0].isupper():
-                result += c.upper()
-            else:
-                result += c.lower()
-    return result
 
-def test_known_case():
-    """Test a known case to verify the decryption algorithm."""
-    alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-    primer = "QUEENLY"
-    ciphertext = "QNXEPVYTWTWP"
-    expected_plaintext = "attackatdawn"
-    
-    # Create the tabula recta
-    tabula_recta = create_tabula_recta(alphabet)
-    
-    # Decrypt with the known primer
-    plaintext = decrypt_autokey(ciphertext, primer, alphabet, tabula_recta)
-    
-    print(f"Primer: {primer}")
-    print(f"Ciphertext: {ciphertext}")
-    print(f"Decrypted: {plaintext}")
-    print(f"Expected: {expected_plaintext}")
-    print(f"Match: {expected_plaintext in plaintext.lower()}")
-    
-    return plaintext
+# ------------------------------------------------------------------ dictionary attack
+
+def _dictionary_decrypt(ciphertext, word, alphabet_str):
+    """attack_support interface (variant and kind fixed to the classic
+    plaintext autokey on the Vigenere tableau)."""
+    return decrypt_autokey(ciphertext, word)
+
+
+def describe(kind, variant, primer):
+    return f"{kind} autokey, {'Vigenere' if variant == 'vigenere' else 'Beaufort'}, primer {to_text(primer)}"
+
+
+# ------------------------------------------------------------------ interface
+
+def ask_kind_variant():
+    option(1, "Plaintext autokey, Vigenere tableau", "(the classic autoclave; default)")
+    option(2, "Plaintext autokey, Beaufort tableau")
+    option(3, "Ciphertext autokey, Vigenere tableau")
+    option(4, "Ciphertext autokey, Beaufort tableau")
+    choice = input("Select (Enter = 1): ").strip() or "1"
+    return {"1": ("plaintext", "vigenere"), "2": ("plaintext", "beaufort"),
+            "3": ("ciphertext", "vigenere"), "4": ("ciphertext", "beaufort")}.get(choice, ("plaintext", "vigenere"))
+
+
+def show_ranked(results, cipher_length, limit=8):
+    import cipher_profile as cp
+    refs = cp.references(cipher_length) if cipher_length >= cp.MIN_LETTERS else None
+    for rank, (score, kind, variant, primer, plain) in enumerate(results[:limit], start=1):
+        verdict = cp.judge(score, refs) if refs else ""
+        colour = GREEN if verdict == "reads as English" else YELLOW if verdict == "partly English" else GREY
+        print(f"\n{rank}. {CYAN}{describe(kind, variant, primer)}{RESET}  fitness {score:.1f} "
+              f"{colour}{'[' + verdict + ']' if verdict else ''}{RESET}")
+        print(f"   {to_text(plain)}")
+
 
 def run():
-    banner("Autokey Cipher", "Primer-keyed autoclave: decrypt or brute-force primers")
-    
-    # Get the alphabet
-    default_alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    banner("Autoclave (Autokey) Cipher", "Decrypt, encrypt, or recover the primer with no word list")
+    option(1, "Recover the primer (no word list)", "(every primer length, both kinds, both tableaux; recommended)")
+    option(2, "Decrypt with a known primer")
+    option(3, "Dictionary attack: every word as the primer", "(classic plaintext autokey only)")
+    option(4, "Encrypt")
+    mode = input("Select (Enter = 1): ").strip() or "1"
 
-    custom_alphabet = input(f"\n{GREY}Use custom alphabet? (y/n, default is A-Z): {RESET}").lower()
-    
-    if custom_alphabet == 'y':
-        alphabet = input(f"{GREY}Enter custom alphabet: {RESET}")
-        # Validate: unique characters only
-        if len(set(alphabet)) != len(alphabet):
-            print(f"{RED}Warning: Duplicate characters in alphabet. Removing duplicates.{RESET}")
-            alphabet = ''.join(dict.fromkeys(alphabet))
-        print(f"{GREEN}Using alphabet: {alphabet}{RESET}")
-    else:
-        alphabet = default_alphabet
-        print(f"{GREEN}Using standard alphabet: {alphabet}{RESET}")
-    
-    # Get ciphertext
-    ciphertext = input(f"\n{GREY}Enter the ciphertext to crack: {RESET}")
-    
-    # Normalize ciphertext to match alphabet
-    ciphertext = normalize_input(ciphertext, alphabet)
-    if not ciphertext:
-        print(f"{RED}Error: No valid characters found in ciphertext after normalization.{RESET}")
+    if mode == "4":
+        plain = to_codes(input(f"{GREY}Plaintext: {RESET}"))
+        primer = to_codes(input("Primer: "))
+        if not plain or not primer:
+            print(f"{RED}Need letters in both.{RESET}")
+            return
+        kind, variant = ask_kind_variant()
+        print(f"\n{GREEN}{to_text(encrypt_codes(plain, primer, kind, variant))}{RESET}")
         return
-    
-    # Check if wordlist exists
-    if not os.path.exists(WORDLIST_PATH):
-        print(f"{RED}Error: '{WORDLIST_PATH}' not found in the current directory.{RESET}")
+
+    cipher = to_codes(input(f"{GREY}Enter ciphertext: {RESET}"))
+    if len(cipher) < 2:
+        print(f"{RED}Need some letters (A-Z).{RESET}")
         return
-    
-    # Get known plaintext fragments
-    known_fragments = []
-    use_fragments = input(f"\n{GREY}Do you have known plaintext fragments? (y/n): {RESET}").lower()
-    if use_fragments == 'y':
-        while True:
-            fragment = input(f"{GREY}Enter a known fragment (or press Enter to finish): {RESET}")
-            if not fragment:
-                break
-            known_fragments.append(fragment)
-    
-    min_ioc = 0.065
-    max_ioc = 0.07
-    
-    custom_ioc = input(f"\n{GREY}Use default IoC range (0.065-0.07)? (y/n): {RESET}").lower()
-    if custom_ioc == 'n':
-        try:
-            min_ioc = float(input(f"{GREY}Enter minimum IoC value: {RESET}"))
-            max_ioc = float(input(f"{GREY}Enter maximum IoC value: {RESET}"))
-        except ValueError:
-            print(f"{RED}Invalid IoC values, using defaults.{RESET}")
-    
-    # Ask if frequency analysis should be performed
-    perform_freq = input(f"\n{GREY}Perform frequency analysis to find English-like text? (y/n): {RESET}").lower()
-    perform_freq_analysis = perform_freq == 'y'
-    
-    freq_threshold = 45.0
-    if perform_freq_analysis:
-        try:
-            custom_threshold = input(f"{GREY}Use default frequency deviation threshold (45.0)? (y/n): {RESET}").lower()
-            if custom_threshold == 'n':
-                freq_threshold = float(input(f"{GREY}Enter frequency deviation threshold (lower values = more English-like): {RESET}"))
-        except ValueError:
-            print(f"{RED}Invalid threshold, using default.{RESET}")
-    
-    # Run the brute force
-    results = brute_force_autokey(
-        ciphertext, 
-        alphabet, 
-        min_ioc, 
-        max_ioc, 
-        known_fragments,
-        perform_freq_analysis, 
-        freq_threshold
-    )
 
-    if results:
-        print(f"\n{GREEN}Found {len(results)} potential matches:{RESET}")
-        
-        # Display top results
-        display_count = min(10, len(results))
-        for i, (primer, plaintext, ioc, freq_analysis, likeness_score) in enumerate(results[:display_count]):
-            print(f"\n{YELLOW}Match #{i+1}:{RESET}")
-            print(f"{GREY}Primer:{RESET} {primer}")
-            print(f"{GREY}Decrypted text:{RESET} {plaintext}")
-            print(f"{GREY}IoC:{RESET} {ioc:.6f}")
-            if perform_freq_analysis:
-                print(f"{GREY}English Likeness Score:{RESET} {likeness_score:.2f} (lower is better)")
-        
-        print(f"\n{GREEN}Total matches found: {len(results)}{RESET}")
-        
-        # Ask to see more details of a specific match
-        if perform_freq_analysis and len(results) > 0:
-            see_details = input(f"\n{GREY}View frequency analysis for a specific match? (Enter match # or 'n'): {RESET}")
-            if see_details.isdigit() and 1 <= int(see_details) <= len(results):
-                match_idx = int(see_details) - 1
-                print(results[match_idx][3])  # Print the frequency analysis
-        
-        # Ask to save results to a file
-        save_option = input(f"\n{GREY}Save results to a file? (y/n): {RESET}").lower()
-        if save_option == 'y':
-            filename = input(f"{GREY}Enter filename (default: autokey_results.txt): {RESET}")
-            if not filename.strip():
-                filename = "autokey_results.txt"
-            utils.save_to_file_autokey(results, filename)
-    else:
-        print(f"\n{RED}No matches found within the specified criteria.{RESET}")
-        
-        # Offer to relax constraints
-        relax = input(f"{GREY}Would you like to relax constraints and try again? (y/n): {RESET}").lower()
-        if relax == 'y':
-            print(f"\n{YELLOW}Suggestions:{RESET}")
-            print(f"1. Widen the IoC range (try 0.05-0.08)")
-            print(f"2. Increase frequency threshold (try 60.0)")
-            print(f"3. Remove or simplify known plaintext fragments")
-            try_again = input(f"\n{GREY}Try again with relaxed constraints? (y/n): {RESET}").lower()
-            if try_again == 'y':
-                # Could implement recursive call to run() here
-                print(f"{YELLOW}Please restart the program and apply relaxed constraints.{RESET}")
+    if mode == "2":
+        primer = to_codes(input("Primer: "))
+        if not primer:
+            print(f"{RED}The primer needs letters.{RESET}")
+            return
+        kind, variant = ask_kind_variant()
+        print(f"\n{GREEN}{to_text(decrypt_codes(cipher, primer, kind, variant))}{RESET}")
+        return
 
-def main():
-    parser = argparse.ArgumentParser(description='Autokey Cipher Brute Force Tool')
-    parser.add_argument('--file', help='Input ciphertext from file')
-    parser.add_argument('--alphabet', default='ABCDEFGHIJKLMNOPQRSTUVWXYZ', help='Custom alphabet')
-    parser.add_argument('--min-ioc', type=float, default=0.065, help='Minimum IoC threshold')
-    parser.add_argument('--max-ioc', type=float, default=0.07, help='Maximum IoC threshold')
-    parser.add_argument('--fragments', nargs='+', help='Known plaintext fragments')
-    parser.add_argument('--wordlist', default='words_alpha.txt', help='Path to wordlist file')
-    parser.add_argument('--freq-threshold', type=float, default=45.0, help='Frequency analysis threshold')
-    parser.add_argument('--output', help='Output results to file')
-    
-    args = parser.parse_args()
-    
-    # If command line arguments are provided, use them
-    if len(sys.argv) > 1:
-        # Override wordlist path if specified
-        if args.wordlist:
-            global WORDLIST_PATH
-            WORDLIST_PATH = args.wordlist
-            
-        # Get ciphertext from file or prompt
-        ciphertext = ""
-        if args.file:
-            try:
-                with open(args.file, 'r', encoding='utf-8') as file:
-                    ciphertext = file.read()
-            except Exception as e:
-                print(f"{RED}Error reading input file: {e}{RESET}")
-                return
-        else:
-            ciphertext = input(f"{GREY}Enter the ciphertext to crack: {RESET}")
-            
-        # Normalize ciphertext
-        ciphertext = normalize_input(ciphertext, args.alphabet)
-        
-        # Run the brute force with command line parameters
-        results = brute_force_autokey(
-            ciphertext,
-            args.alphabet,
-            args.min_ioc,
-            args.max_ioc,
-            args.fragments,
-            True if args.freq_threshold != 45.0 else False,
-            args.freq_threshold
-        )
-        
-        # Display results
-        if results:
-            print(f"\n{GREEN}Found {len(results)} potential matches:{RESET}")
-            display_count = min(10, len(results))
-            for i, (primer, plaintext, ioc, freq_analysis, likeness_score) in enumerate(results[:display_count]):
-                print(f"\n{YELLOW}Match #{i+1}:{RESET}")
-                print(f"{GREY}Primer:{RESET} {primer}")
-                print(f"{GREY}Decrypted text:{RESET} {plaintext}")
-                print(f"{GREY}IoC:{RESET} {ioc:.6f}")
-                if likeness_score != float('inf'):
-                    print(f"{GREY}English Likeness Score:{RESET} {likeness_score:.2f} (lower is better)")
-            
-            # Save to file if requested
-            if args.output:
-                utils.save_to_file_autokey(results, args.output)
-        else:
-            print(f"\n{RED}No matches found within the specified criteria.{RESET}")
-    else:
-        # Interactive mode
-        run()
+    import cipher_profile as cp
+    fitness = cp.fitness_function()
+    if mode == "3":
+        from attack_support import load_dictionary, run_batches, sort_results
+        words = load_dictionary(WORDLIST_PATH, ALPHABET, 1, 20)
+        phrases = [p.strip() for p in input("Known plaintext words (comma-separated, optional): ").split(",") if p.strip()]
+        from ngram_scoring import load_ngram_scores
+        results = sort_results(run_batches(_dictionary_decrypt, words, to_text(cipher), ALPHABET, phrases,
+                                           load_ngram_scores(), 0.060, 0.075))
+        print(f"\n{BOLD}Best primers{RESET} {GREY}(lowest n-gram cost first; phrase matches on top){RESET}")
+        for rank, result in enumerate(results[:10], start=1):
+            mark = f" {GREEN}[phrase match]{RESET}" if result['is_phrase_match'] else ""
+            print(f"{rank:>2}. {YELLOW}{result['key']}{RESET} cost {result['bigram_score']:.1f}{mark}\n    {result['plaintext']}")
+        return
+
+    default_max = max(1, min(20, len(cipher) // 4))
+    answer = input(f"Longest primer to try (Enter = {YELLOW}{default_max}{RESET}): ").strip()
+    max_length = int(answer) if answer.isdigit() and int(answer) >= 1 else default_max
+    print(f"{GREY}Trying primer lengths 1-{max_length}, plaintext and ciphertext autokey, Vigenere and Beaufort...{RESET}")
+    results = attack(cipher, max_length, fitness,
+                     report=lambda length: print(f"  primer length {length} done", end="\r"))
+    print(" " * 40, end="\r")
+    print(f"{BOLD}Best results{RESET} {GREY}(higher fitness = more English){RESET}")
+    show_ranked(results, len(cipher))
+    print(f"\n{GREY}The primer letters only affect the first letters of each chain; a result that reads as "
+          f"English with an odd-looking primer is still a solution (the primer may be a word you can now "
+          f"guess). Short texts can give several near-equal primers.{RESET}")
+
 
 if __name__ == "__main__":
-    import sys
-    main()
+    run()

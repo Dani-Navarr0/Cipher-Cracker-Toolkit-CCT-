@@ -7,3 +7,6 @@ N-grams/.cache/
 
 # Native engines are built per machine (python scripts/native_tools.py build)
 scripts/native/build/
+
+# Paradigm Kryptos CTF puzzles and work in progress (not published yet)
+ciphers/paradigm/

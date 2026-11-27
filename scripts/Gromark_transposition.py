@@ -513,7 +513,10 @@ def run_direct_decryption():
     print(f"\n{GREEN}--- Mode 2: Direct Decryption ---{RESET}")
     ciphertext = input("Enter ciphertext: ").upper()
     keyword = input("Enter keyword: ").upper()
-    primer = input("Enter primer (5-digit number): ")
+    primer = input("Enter primer (5-digit number): ").strip()
+    if len(primer) != 5 or not primer.isdigit():
+        print(f"{RED}The primer must be exactly 5 digits (got '{primer}').{RESET}")
+        return
     alphabet = input("Enter alphabet (default: A-Z): ").upper() or "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
     mixed = create_keyed_alphabet(keyword, alphabet)
     running = generate_running_key(primer, len(ciphertext))

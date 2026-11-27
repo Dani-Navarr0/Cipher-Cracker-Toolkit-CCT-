@@ -1,7 +1,11 @@
 import os
 import datetime
+import heapq
 import re
 from utils import utils
+from ngram_scoring import load_ngram_scores, score_text
+
+KEEP_OUTSIDE_WINDOW = 25
 
 # ANSI color codes for terminal output
 from theme import RED, GREEN, YELLOW, BLUE, CYAN, GREY, WHITE, RESET, banner
@@ -30,20 +34,22 @@ def modular_operation(message_values, key, operation='add', modulus=26, base_ind
     Note: All internal calculations are done 0-indexed (A=0).
     The base_index is a display concern handled elsewhere.
     """
-    if len(key) < len(message_values):
-        key = key * (len(message_values) // len(key) + 1)
-    key = key[:len(message_values)]
-    
+    # Letters of a text key only (a space or digit is not a shift), and the key
+    # advances only on message symbols, not on the spaces kept as -1.
+    if isinstance(key, str):
+        key = [ord(ch) - ord('A') for ch in key.upper() if 'A' <= ch <= 'Z']
+    if not key:
+        return list(message_values)
+
     result = []
-    for i, m_val in enumerate(message_values):
+    position = 0
+    for m_val in message_values:
         if m_val == -1:
             result.append(-1)
             continue
-            
-        if isinstance(key[i], int):
-            k_val = key[i]
-        else:
-            k_val = ord(key[i].upper()) - ord('A')
+
+        k_val = key[position % len(key)]
+        position += 1
         
         # <<< CHANGE START: Removed incorrect base_index adjustments.
         # All calculations are now performed on the direct 0-indexed values.
@@ -110,10 +116,13 @@ def brute_force_with_ioc(ciphertext, operation, modulus, base_index, custom_alph
         return []
     
     results = []
+    outside, costs = [], {}
+    model = load_ngram_scores()
     total_words = len(words)
-    
+
     print(f"\n{YELLOW}Starting brute force with {total_words} words...{RESET}")
-    print(f"\n-{GREY}IoC filter range: {min_ioc} to {max_ioc}{RESET}")
+    print(f"\n-{GREY}IoC filter range: {min_ioc} to {max_ioc} (plus the {KEEP_OUTSIDE_WINDOW} most English-like "
+          f"results outside it; ranked by n-gram cost){RESET}")
     print(f"-{GREY}Modular {operation} with modulus {modulus} (Base index: {base_index}){RESET}")
     if custom_alphabet:
         print(f"-{GREY}Using custom alphabet: {custom_alphabet}{RESET}")
@@ -148,7 +157,9 @@ def brute_force_with_ioc(ciphertext, operation, modulus, base_index, custom_alph
         
         # Calculate IoC
         ioc = utils.calculate_ioc(result_text)
-        
+        cost = score_text(result_text, model)
+        costs[test_word] = cost
+
         # Check if result matches IoC criteria
         if min_ioc <= ioc <= max_ioc and len(result_text.strip()) > 0:
             if perform_freq_analysis:
@@ -157,15 +168,22 @@ def brute_force_with_ioc(ciphertext, operation, modulus, base_index, custom_alph
                     results.append((test_word, "Modular", result_text, ioc, freq_analysis, likeness_score))
             else:
                 results.append((test_word, "Modular", result_text, ioc, "", float('inf')))
-    
+        else:
+            # English text often falls outside a narrow IoC window: keep the best
+            # n-gram candidates regardless, so the right key is not discarded.
+            heapq.heappush(outside, (-cost, words_checked, (test_word, "Modular", result_text, ioc, "", float('inf'))))
+            if len(outside) > KEEP_OUTSIDE_WINDOW:
+                heapq.heappop(outside)
+
     print(f"{GREY}Completed! {total_words} words checked.{RESET}                ")
-    
-    # Sort results - first by frequency analysis score if available, then by IoC
+    results += [entry for _, _, entry in outside]
+
+    # Frequency-analysis score first if requested, then n-gram cost (lower = more English).
     if perform_freq_analysis:
-        results.sort(key=lambda x: (x[5], -x[3]))  # Sort by likeness score, then by IoC (descending)
+        results.sort(key=lambda x: (x[5], costs.get(x[0], 255)))
     else:
-        results.sort(key=lambda x: x[3], reverse=True)  # Sort by IoC
-        
+        results.sort(key=lambda x: costs.get(x[0], 255))
+
     return results
 
 def run():

@@ -1,3 +1,4 @@
+import heapq
 import itertools
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import os
@@ -100,18 +101,31 @@ def gronsfeld_decrypt(ciphertext: str, key: str, alphabet: str) -> str:
     return ''.join(decrypted_text)
 
 # --- EXHAUSTIVE ATTACK ---
+KEEP_PER_BATCH = 50
+
+
 def process_exhaustive_batch(args):
-    ciphertext, alphabet, keys_batch, expected_freqs = args
-    results = []
-    for key in keys_batch:
+    """Keys start..end-1 (as zero-padded digits), generated here rather than
+    sent from the parent. Returns only phrase matches plus the best
+    KEEP_PER_BATCH by n-gram score, so memory stays flat for any key length."""
+    ciphertext, alphabet, start, end, key_length, expected_freqs, known = args
+    kept, matched = [], []
+    for number in range(start, end):
+        key = str(number).zfill(key_length)
         try:
             decrypted = gronsfeld_decrypt(ciphertext, key, alphabet)
-            ioc = utils.calculate_ioc(decrypted)
-            score = calculate_ngram_score(decrypted, expected_freqs, 2)
-            results.append({'key': key, 'decrypted': decrypted, 'ioc': ioc, 'score': score})
         except (ValueError, IndexError):
             continue
-    return results
+        score = calculate_ngram_score(decrypted, expected_freqs, 2)
+        if known and any(word.lower() in decrypted for word in known):
+            matched.append((score, key, decrypted))
+        elif len(kept) < KEEP_PER_BATCH:
+            heapq.heappush(kept, (-score, key, decrypted))
+        elif -score > kept[0][0]:
+            heapq.heapreplace(kept, (-score, key, decrypted))
+    entries = matched + [(-negative, key, text) for negative, key, text in kept]
+    return [{'key': key, 'decrypted': text, 'ioc': utils.calculate_ioc(text), 'score': score}
+            for score, key, text in entries]
 
 def run_exhaustive_attack(ciphertext: str, alphabet: str, expected_freqs: Dict):
     print(f"\n{BLUE}--- Exhaustive Brute-Force Attack ---{RESET}")
@@ -137,12 +151,12 @@ def run_exhaustive_attack(ciphertext: str, alphabet: str, expected_freqs: Dict):
         futures = []
         for start in range(0, total_combinations, batch_size):
             end = min(start + batch_size, total_combinations)
-            batch = [str(i).zfill(key_length) for i in range(start, end)]
-            futures.append(executor.submit(process_exhaustive_batch, (ciphertext, alphabet, batch, expected_freqs)))
-        
+            futures.append(executor.submit(process_exhaustive_batch, (
+                ciphertext, alphabet, start, end, key_length, expected_freqs, known_plaintexts)))
+
         for i, future in enumerate(as_completed(futures)):
             results.extend(future.result())
-            print(f"Progress: {((i + 1) * batch_size) / total_combinations:.1%}", end='\r')
+            print(f"Progress: {(i + 1) / len(futures):.1%}", end='\r')
     
     if results:
         for r in results: r['matched_phrases'] = [w for w in known_plaintexts if w.lower() in r['decrypted']]
@@ -191,7 +205,8 @@ def run_simulated_annealing_attack(ciphertext: str, alphabet: str, config: Dict)
         ioc_range=ioc_range, scoring_mode=scoring_mode,
     )
     if results is None:
-        print(f"{RED}Annealing needs an alphabet that is a permutation of A-Z.{RESET}")
+        print(f"{RED}Annealing could not start: it needs letters A-Z in the ciphertext, a key length of at least 1, "
+              f"and an alphabet that is a permutation of A-Z.{RESET}")
         return
 
     print("\n" + "="*80)

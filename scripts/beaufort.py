@@ -200,7 +200,8 @@ def run_simulated_annealing_attack(ciphertext: str, alphabet_str: str, expected_
         expected_freqs, Schedule(iterations), restarts=restarts,
     )
     if results is None:
-        print(f"{RED}Annealing needs an alphabet that is a permutation of A-Z.{RESET}")
+        print(f"{RED}Annealing could not start: it needs letters A-Z in the ciphertext, a key length of at least 1, "
+              f"and an alphabet that is a permutation of A-Z.{RESET}")
         return []
 
     best_key = results[0][0]

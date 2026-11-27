@@ -44,13 +44,23 @@ def parse_known(text):
 
 
 def parse_range(text, default):
+    """'5', '3-9' or '9-3' (either order). Raises ValueError for anything else."""
     text = text.strip()
     if not text:
         return default
     if "-" in text:
-        low, high = text.split("-")
-        return range(int(low), int(high) + 1)
+        low, _, high = text.partition("-")
+        low, high = int(low), int(high)
+        return range(min(low, high), max(low, high) + 1)
     return range(int(text), int(text) + 1)
+
+
+def describe_key(key):
+    """Key values (0-25, or None where no known letter fixes the slot) as letters, '?' for unknown."""
+    if not key:
+        return "-"
+    return "".join("?" if value is None else crib.ALPHABET[value] if isinstance(value, int) else str(value)
+                   for value in key)
 
 
 def run_search(ciphertext, known, widths, periods, alphabets, min_checks=None, engine="auto", report=print):
@@ -98,8 +108,17 @@ def run():
         widths = parse_range(input("Column counts to test [2-8]: "), range(2, 9))
         periods = parse_range(input("Key lengths to test [1-20]: "), range(1, 21))
     except ValueError as error:
-        print(f"{RED}{error}{RESET}")
+        print(f"{RED}{error or 'Could not read that range.'}{RESET}")
         return
+    if min(widths) < 2 or min(periods) < 1:
+        print(f"{RED}Column counts start at 2 and key lengths at 1.{RESET}")
+        return
+    orders = sum(math.factorial(w) for w in widths)
+    if orders > 50_000_000:
+        print(f"{YELLOW}Widths {min(widths)}-{max(widths)} mean {orders:,} column orders per layout, key length and "
+              f"alphabet: hours even in C (width 12 alone is 479 million).{RESET}")
+        if input("Continue anyway? (y/[N]): ").strip().lower() != "y":
+            return
     alphabets = {"AZ": crib.ALPHABET}
     keyword = input(f"Keyword for a keyed alphabet (optional, e.g. {KEYWORD_EXAMPLE}): ").strip().upper()
     if keyword:
@@ -124,6 +143,7 @@ def run():
     for rank, hit in enumerate(hits[:20], start=1):
         print(f"\n{CYAN}#{rank}{RESET} checks {GREEN}{hit['checks']}{RESET} | width {hit['width']} {hit['layout']} "
               f"order {hit['column_order']} | {hit['combo']} | {hit['order']} | key length {hit['period']}")
+        print(f"   key {YELLOW}{describe_key(hit['key'])}{RESET}")
         print(f"   {hit['plaintext']}")
     print(f"\n{GREY}'?' marks letters whose key slot holds no known letter. Each agreement is a 1-in-26 event "
           f"for a wrong hypothesis, so judge hits by whether the rest of the text reads.{RESET}")

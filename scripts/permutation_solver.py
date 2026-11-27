@@ -27,8 +27,9 @@ from transposition_core import make_decryptor, letter_entropy
 from theme import RED, GREEN, YELLOW, BLUE, CYAN, GREY, WHITE, RESET, banner
 
 TRANSPOSITION_MODES = {
-    '1': ('write_rows_read_rows', 'Write Rows, Permute Cols, Read Rows (Standard Matrix Transposition)'),
-    '2': ('write_rows_read_cols', 'Write Rows, Permute Cols, Read Columns'),
+    # Numbered as in tools 32 and 37 (layered.TRANSPOSITION_MODES order).
+    '1': ('write_rows_read_cols', 'Write Rows, Permute Cols, Read Columns (Standard Columnar)'),
+    '2': ('write_rows_read_rows', 'Write Rows, Permute Cols, Read Rows (Matrix Transposition)'),
     '3': ('write_cols_read_rows', 'Write Columns, Permute Cols, Read Rows'),
     '4': ('write_cols_read_cols', 'Write Columns, Permute Cols, Read Columns'),
 }
@@ -404,35 +405,47 @@ def save_results_to_file(results: List[Dict], filename: str, static_ioc: float):
         print(f"\n{RED}Error saving file: {e}{RESET}")
 
 
+def parse_widths(text, length):
+    widths = []
+    for part in text.replace(" ", "").split(","):
+        if "-" in part:
+            low, _, high = part.partition("-")
+            if low.isdigit() and high.isdigit():
+                widths += range(int(low), int(high) + 1)
+        elif part.isdigit():
+            widths.append(int(part))
+    return sorted({w for w in widths if 2 <= w < length})
+
+
+def annealing_steps(starting_temp, cooling_rate, steps_per_temp):
+    """Steps one annealing pass takes (the loop cools from starting_temp to 0.1)."""
+    if starting_temp <= 0.1 or not 0 < cooling_rate < 1:
+        return 0
+    return steps_per_temp * math.ceil(math.log(0.1 / starting_temp) / math.log(cooling_rate))
+
+
 def run():
-    banner("Matrix Permutation Solver", "Keyless column-order search: brute force and annealing")
+    banner("Matrix Permutation Solver", "Keyless column-order search: brute force and annealing, 4 layouts")
 
     ciphertext_input = input(f"\n{GREY}Enter ciphertext: {RESET}").strip().upper()
-    ciphertext = "".join(filter(str.isalpha, ciphertext_input))
-    if not ciphertext:
-        print(f"{RED}No valid ciphertext provided.{RESET}")
+    ciphertext = "".join(ch for ch in ciphertext_input if "A" <= ch <= "Z")
+    if len(ciphertext) < 6:
+        print(f"{RED}Need at least 6 letters A-Z.{RESET}")
         return
-
     length = len(ciphertext)
     static_ioc = calculate_ioc(ciphertext)
-    factors = get_factors(length)
-    
+    factors = [f for f in get_factors(length) if f < length]
+
     print(f"\n{BLUE}Text Length:{RESET} {length} | Monogram IoC: {YELLOW}{static_ioc:.4f}{RESET}")
     if factors:
-        print(f"{BLUE}Possible matrix widths (factors of {length}):{RESET} {factors}")
+        print(f"{BLUE}Widths that fill a complete rectangle:{RESET} {factors}")
     else:
-        print(f"{RED}Length {length} is prime or has no composite factors. Standard matrix transposition impossible.{RESET}")
-        return
-
-    w_in = input(f"\nEnter specific width(s) separated by commas, or blank for all factors: ").strip()
-    if w_in:
-        try:
-            target_widths = [int(w) for w in (part.strip() for part in w_in.split(",")) if w and 2 <= int(w) < length]
-        except ValueError:
-            target_widths = factors
-    else:
-        target_widths = factors
-
+        print(f"{GREY}{length} is prime: no width fills a complete rectangle; the last row is simply shorter "
+              f"(irregular columnar), which every layout here handles.{RESET}")
+    default_widths = sorted(set(range(2, min(12, length - 1) + 1)) | {f for f in factors if f <= 30})
+    extra = " + factors" if any(f > 12 for f in default_widths) else ""
+    w_in = input(f"\nWidths, e.g. 8 or 5-12 or 6,9,14 (Enter = {YELLOW}{default_widths[0]}-12{extra}{RESET}): ").strip()
+    target_widths = parse_widths(w_in, length) if w_in else default_widths
     if not target_widths:
         print(f"{RED}No valid widths selected.{RESET}")
         return
@@ -440,9 +453,8 @@ def run():
     print(f"\n{GREY}Select Layout Mode(s):{RESET}")
     for k, (code, name) in TRANSPOSITION_MODES.items():
         print(f"  [{k}] {name}")
-    print(f"  [{YELLOW}A{RESET}] ALL MODES (Evaluate all 4 layout options) [DEFAULT]")
-    
-    mode_choice = input(f"Select option: ").strip().upper()
+    print(f"  [{YELLOW}A{RESET}] All four layouts [DEFAULT]")
+    mode_choice = input("Select option: ").strip().upper()
     if mode_choice in TRANSPOSITION_MODES:
         active_modes = [TRANSPOSITION_MODES[mode_choice]]
     else:
@@ -452,85 +464,92 @@ def run():
     print(f"{GREY}Loading N-gram model from: {YELLOW}{selected_ngram_path.name}{RESET}")
     ngram_model = load_ngram_scores(selected_ngram_path)
 
-    print(f"\n{GREY}Configure Search Parameters:{RESET}")
-    t_in = input(f"Starting Temperature (default {YELLOW}20.0{RESET}): ")
-    starting_temp = float(t_in) if t_in else 20.0
-    
-    c_in = input(f"Cooling Rate (default {YELLOW}0.995{RESET}): ")
-    cooling_rate = float(c_in) if c_in else 0.995
-    
-    s_in = input(f"Steps per temperature (default {YELLOW}1000{RESET}): ")
-    steps_per_temp = int(s_in) if s_in else 1000
-    
-    r_in = input(f"Passes per mode/width (default {YELLOW}3{RESET}): ")
-    runs = int(r_in) if r_in else 3
-    
-    ew_in = input(f"Entropy Weight (AZDecrypt default ~{YELLOW}0.5{RESET}): ")
-    ent_weight = float(ew_in) if ew_in else 0.5
+    try:
+        import native as _native_engines
+        native = _native_engines.available()   # the C library is built and loads
+    except (ImportError, OSError):
+        native = False
+    bf_default = 9 if native else 8
+    engine = "C engine available" if native else "Python; 45 builds the C engine"
+    bf_in = input(f"\nBrute-force every column order up to width (Enter = {YELLOW}{bf_default}{RESET}, "
+                  f"{GREY}{engine}{RESET}): ").strip()
+    bf_limit = int(bf_in) if bf_in.isdigit() else bf_default
 
-    sp_in = input(f"Automatically insert spaces into output? ([Y]/n): ").strip().lower()
-    enable_spacing = sp_in != 'n'
+    print(f"\n{GREY}Annealing for wider keys (Enter keeps the defaults):{RESET}")
+    try:
+        t_in = input(f"Starting Temperature (default {YELLOW}20.0{RESET}): ")
+        starting_temp = float(t_in) if t_in else 20.0
+        c_in = input(f"Cooling Rate (default {YELLOW}0.995{RESET}): ")
+        cooling_rate = float(c_in) if c_in else 0.995
+        s_in = input(f"Steps per temperature (default {YELLOW}1000{RESET}): ")
+        steps_per_temp = int(s_in) if s_in else 1000
+        r_in = input(f"Passes per mode/width (default {YELLOW}3{RESET}): ")
+        runs = int(r_in) if r_in else 3
+        ew_in = input(f"Entropy Weight (AZDecrypt default ~{YELLOW}0.5{RESET}): ")
+        ent_weight = float(ew_in) if ew_in else 0.5
+    except ValueError:
+        print(f"{RED}Not a number.{RESET}")
+        return
+
+    # Estimate before starting: one fitness evaluation, timed on this machine.
+    fitness = make_fitness(ciphertext, target_widths[-1], active_modes[0][0], ngram_model, ent_weight)
+    sample = list(range(target_widths[-1]))
+    started = time.perf_counter()
+    for _ in range(300):
+        random.shuffle(sample)
+        fitness(sample)
+    per_eval = (time.perf_counter() - started) / 300
+    brute = [w for w in target_widths if w <= bf_limit]
+    anneal = [w for w in target_widths if w > bf_limit]
+    brute_evals = sum(math.factorial(w) for w in brute) * len(active_modes)
+    anneal_evals = annealing_steps(starting_temp, cooling_rate, steps_per_temp) * runs * len(anneal) * len(active_modes)
+    estimate = (0 if native else brute_evals * per_eval) + anneal_evals * per_eval
+    c_note = " (brute force runs in C and is not counted)" if native and brute else ""
+    print(f"\n{BLUE}Plan:{RESET} brute force widths {brute or 'none'}, annealing widths {anneal or 'none'}, "
+          f"{len(active_modes)} layout(s): about {YELLOW}{estimate / 60:.1f} min{RESET} at Python speed{c_note}. "
+          f"Ctrl+C ends a pass early.")
+    if input("Start? ([Y]/n): ").strip().lower() == 'n':
+        return
+
+    sp_in = input("Automatically insert spaces into output? ([Y]/n): ").strip().lower()
     spacing_model = None
-    if enable_spacing:
-        spacing_path = select_spacing_model_path(selected_ngram_path)
-        print(f"{GREY}Loading spacing model from: {YELLOW}{spacing_path.name}{RESET}")
-        spacing_model = load_spacing_model(spacing_path)
+    if sp_in != 'n':
+        spacing_model = load_spacing_model(select_spacing_model_path(selected_ngram_path))
         _ = spacing_model.scores
 
     all_results = []
-
     for width in target_widths:
         for mode_code, mode_desc in active_modes:
-            print(f"\n{CYAN}================ WIDTH {width} ({length // width} Rows) | MODE: {mode_desc} ================{RESET}")
-            
-            # Choose Brute Force for small widths (<= 8) or SA for large widths
-            if width <= 8:
-                bf_choice = input(f"Width {width} has {math.factorial(width):,} permutations. Run Brute Force? ([Y]/n): ").strip().lower()
-                use_bf = bf_choice != 'n'
+            rows = -(-length // width)
+            short = "" if length % width == 0 else ", last row short"
+            print(f"\n{CYAN}=== WIDTH {width} ({rows} rows{short}) | {mode_desc} ==={RESET}")
+            if width <= bf_limit:
+                passes = [run_brute_force_for_width(ciphertext, width, mode_code, ngram_model, ent_weight)]
             else:
-                use_bf = False
-
-            if use_bf:
-                perm, score, text = run_brute_force_for_width(ciphertext, width, mode_code, ngram_model, ent_weight)
-                spaced_text = add_spaces(text, spacing_model) if enable_spacing and spacing_model else ""
+                passes = [run_simulated_annealing_pass(ciphertext, width, mode_code, ngram_model, starting_temp,
+                                                       cooling_rate, steps_per_temp, ent_weight)
+                          for _ in range(runs)]
+            for perm, score, text in passes:
                 all_results.append({
-                    'width': width,
-                    'perm': perm,
-                    'score': score,
-                    'text': text,
-                    'spaced_text': spaced_text,
-                    'mode_code': mode_code,
-                    'mode_desc': mode_desc
+                    'width': width, 'perm': perm, 'score': score, 'text': text,
+                    'spaced_text': add_spaces(text, spacing_model) if spacing_model else "",
+                    'mode_code': mode_code, 'mode_desc': mode_desc,
                 })
-            else:
-                for i in range(runs):
-                    print(f"\n{YELLOW}--- WIDTH {width} | {mode_desc} | PASS {i+1} OF {runs} ---{RESET}")
-                    perm, score, text = run_simulated_annealing_pass(
-                        ciphertext, width, mode_code, ngram_model, starting_temp, cooling_rate, steps_per_temp, ent_weight
-                    )
-                    
-                    spaced_text = add_spaces(text, spacing_model) if enable_spacing and spacing_model else ""
-                    all_results.append({
-                        'width': width,
-                        'perm': perm,
-                        'score': score,
-                        'text': text,
-                        'spaced_text': spaced_text,
-                        'mode_code': mode_code,
-                        'mode_desc': mode_desc
-                    })
 
     all_results.sort(key=lambda x: x['score'], reverse=True)
     best = all_results[0]
-
+    from transposition_core import order_to_keyword
     print(f"\n{YELLOW}================ FINAL BEST RESULT ================{RESET}")
-    print(f"Matrix Size:   {best['width']} Columns x {length // best['width']} Rows")
+    print(f"Matrix Size:   {best['width']} columns x {-(-length // best['width'])} rows")
     print(f"Layout Mode:   {CYAN}{best['mode_desc']}{RESET}")
-    print(f"Permutation:   {best['perm']}")
-    print(f"Fitness Score: {GREEN}{best['score']:.2f}{RESET}")
-    print(f"Monogram IoC:  {GREEN}{static_ioc:.4f}{RESET}")
+    print(f"Read order:    {list(best['perm'])}  {GREY}(as a key: {order_to_keyword(best['perm'])}; "
+          f"tool 20's Direct decrypt accepts either){RESET}")
+    print(f"Fitness Score: {GREEN}{best['score']:.2f}{RESET} {GREY}(higher = more English){RESET}")
+    if length >= 20:
+        import cipher_profile as cp
+        print(f"Verdict:       {cp.judge(best['score'], cp.references(length))} "
+              f"{GREY}(against English of the same length){RESET}")
     print(f"\nPlaintext (Raw):\n{GREEN}{best['text']}{RESET}")
-
     if best.get('spaced_text'):
         print(f"\nPlaintext (Spaced):\n{CYAN}{best['spaced_text']}{RESET}")
 
@@ -538,13 +557,11 @@ def run():
         print(f"\n{YELLOW}--- TOP RANKED SOLUTIONS ACROSS ALL WIDTHS/MODES/PASSES ---{RESET}")
         for rank, res in enumerate(all_results[:5], start=1):
             print(f"Rank #{rank}: Width: {res['width']} | Mode: {res['mode_desc']} | Score: {GREEN}{res['score']:.2f}{RESET}")
-            print(f"  Perm: {res['perm']} | Text: {res['text'][:45]}...")
+            print(f"  Read order: {list(res['perm'])} | Text: {res['text'][:45]}...")
 
-    save_in = input(f"\nExport results to a .txt file? ({YELLOW}Y/n{RESET}): ").strip().lower()
-    if save_in != 'n':
-        fname = input("Enter filename (default: permutation_results.txt): ").strip()
-        if not fname:
-            fname = "permutation_results.txt"
+    save_in = input("\nExport results to a .txt file? (y/[N]): ").strip().lower()
+    if save_in == 'y':
+        fname = input("Enter filename (default: permutation_results.txt): ").strip() or "permutation_results.txt"
         if not fname.endswith(".txt"):
             fname += ".txt"
         save_results_to_file(all_results, fname, static_ioc)

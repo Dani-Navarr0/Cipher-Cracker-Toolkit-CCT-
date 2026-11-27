@@ -19,22 +19,13 @@
  *  - cct_crib_columnar_periodic: every column order + a periodic key, both
  *    orders, consistent with known plaintext letters (crib_columnar_search.py).
  */
-#include <math.h>
-#include <stdint.h>
-#include <stdlib.h>
-#include <string.h>
-
-#ifdef _WIN32
-#define EXPORT __declspec(dllexport)
-#else
-#define EXPORT __attribute__((visibility("default")))
-#endif
+#include "cct_common.h"
 
 #define MAXW 64
 #define MAXCRIB 128
 #define MAXP 128
 
-EXPORT int32_t cct_native_version(void) { return 1; }
+EXPORT int32_t cct_native_version(void) { return 3; }
 
 typedef struct {
     int32_t n;                    /* text length (letters) */
@@ -110,16 +101,7 @@ EXPORT int64_t cct_order_total(const Layout *t, const uint8_t *key, const uint8_
 }
 
 /* ---------------------------------------------------------------- annealing */
-typedef struct { uint64_t s[4]; } Rng;
-static uint64_t rotl(uint64_t x, int k) { return (x << k) | (x >> (64 - k)); }
-static uint64_t rng_next(Rng *r) {
-    uint64_t result = rotl(r->s[1] * 5, 7) * 9, t = r->s[1] << 17;
-    r->s[2] ^= r->s[0]; r->s[3] ^= r->s[1]; r->s[1] ^= r->s[2]; r->s[0] ^= r->s[3];
-    r->s[2] ^= t; r->s[3] = rotl(r->s[3], 45);
-    return result;
-}
-static double rng_double(Rng *r) { return (double)(rng_next(r) >> 11) * (1.0 / 9007199254740992.0); }
-static int rng_below(Rng *r, int n) { return (int)(rng_double(r) * n); }
+/* Rng, rng_next, rng_double, rng_below: cct_common.h */
 
 typedef struct {
     uint8_t current[MAXW], best[MAXW];
@@ -248,3 +230,12 @@ EXPORT int64_t cct_crib_columnar_periodic(
     *nhits_out = nhits;
     return processed;
 }
+
+/* ---------------------------------------------------------------- shared scoring (version 2) */
+
+/* ngram_scoring.ngram_total: sum of the table scores of every overlapping
+ * n-gram of `codes` (0-25), rolling index. Identical to the Python loop. */
+EXPORT int64_t cct_ngram_total(const uint8_t *codes, int32_t n, const uint8_t *scores, int32_t size) {
+    return cct_total(codes, n, scores, size);
+}
+

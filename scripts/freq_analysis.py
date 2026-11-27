@@ -117,15 +117,14 @@ def analyze_frequency(text):
 def run():
     banner("Frequency Analysis", "Letter, bigram and trigram statistics vs English")
     
-    input_string = input(f"{GREY}Enter your string: {RESET}")
+    input_string = input(f"{GREY}Enter ciphertext: {RESET}")
+    if not any(ch.isalpha() for ch in input_string):
+        print(f"{RED}Error: no letters in the input.{RESET}")
+        return
 
     analysis_text, total_deviation = analyze_frequency(input_string)
     print(analysis_text)
     print(f"{GREY}Total Deviation Score:{RESET} {YELLOW}{total_deviation:.2f}{RESET}")
-
-    if not input_string:
-        print(f"{RED}Error: Empty input string.{RESET}")
-        return
 
 if __name__ == "__main__":
     run()

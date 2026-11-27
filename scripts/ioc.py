@@ -29,15 +29,16 @@ def calculate_ioc(text: str) -> float:
 def run():
     banner("Index of Coincidence", "English ~0.066, random letters ~0.038")
     
-    input_string = input(f"{GREY}Enter your string: {RESET}")
-
-    print(f"{GREY}Index of Coincidence:{RESET} {calculate_ioc(input_string)}")
-    print(f"{GREY}English IoC:{RESET} {YELLOW}0.0665{RESET}")
-    print(f"{GREEN}===================================={RESET}")
-    
-    if not input_string:
-        print(f"{RED}Error: Empty input string.{RESET}")
+    input_string = input(f"{GREY}Enter ciphertext: {RESET}")
+    letters = sum(ch.isalpha() for ch in input_string)
+    if letters < 2:
+        print(f"{RED}Error: need at least two letters.{RESET}")
         return
+
+    print(f"{GREY}Index of Coincidence:{RESET} {YELLOW}{calculate_ioc(input_string):.4f}{RESET} "
+          f"{GREY}({letters} letters){RESET}")
+    print(f"{GREY}English ~0.066 | random letters ~0.038. Short texts vary a lot around these; "
+          f"39 Unknown Cipher Analyzer compares with references of the same length.{RESET}")
 
 if __name__ == "__main__":
     run()

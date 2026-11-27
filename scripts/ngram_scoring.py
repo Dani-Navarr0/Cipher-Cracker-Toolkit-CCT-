@@ -40,7 +40,29 @@ def codes_to_text(codes: bytes | bytearray) -> str:
     return bytes(codes).translate(_CODES_TO_LETTERS).decode("ascii")
 
 
-def ngram_total(codes: bytes | bytearray, scores: bytes | bytearray, ngram_size: int) -> int:
+def _native_ngram_total():
+    """The C version of ngram_total when the native library is built (identical
+    results, checked in tests/test_native.py), else None."""
+    import os
+    if os.environ.get("CCT_NATIVE", "1") == "0":
+        return None
+    try:
+        import native
+        from native import fast
+        if not native.available():
+            return None
+        function, pointer = native.library().cct_ngram_total, fast._scores_pointer
+    except Exception:
+        return None
+
+    def ngram_total(codes, scores, ngram_size):
+        if not isinstance(codes, bytes):
+            codes = bytes(codes)
+        return function(codes, len(codes), pointer(scores), ngram_size)
+    return ngram_total
+
+
+def ngram_total_python(codes: bytes | bytearray, scores: bytes | bytearray, ngram_size: int) -> int:
     """Sum the table scores of every overlapping n-gram in ``codes`` (0-25 values).
 
     Uses a rolling index so each position costs one multiply-add instead of
@@ -57,6 +79,9 @@ def ngram_total(codes: bytes | bytearray, scores: bytes | bytearray, ngram_size:
         index = index % modulus * 26 + code
         total += scores[index]
     return total
+
+
+ngram_total = _native_ngram_total() or ngram_total_python
 
 
 @dataclass(frozen=True)

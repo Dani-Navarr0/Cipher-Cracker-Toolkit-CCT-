@@ -13,7 +13,7 @@ class DummyUtils:
                 f.write("Scytale Cipher Brute-Force Results\n")
                 f.write("=====================================\n\n")
                 for result in results:
-                    f.write(f"Key (Sides/Diameter): {result['key']}\n")
+                    f.write(f"Key: {result['key']} grid columns (letters per turn)\n")
                     f.write(f"IoC Score: {result.get('ioc', 0):.4f}\n")
                     f.write(f"N-gram Score: {result.get('bigram_score', 0):.2f}\n")
                     f.write(f"Decrypted: {result['plaintext']}\n")
@@ -134,8 +134,10 @@ def run():
     ciphertext = input(f"Enter the ciphertext: {GREEN}").upper().replace(" ", "")
     
     print(f"\n{RESET}Choose a mode:")
-    print(f"  ({YELLOW}1{RESET}) Decrypt with a specific key (number of sides/diameter)")
-    print(f"  ({YELLOW}2{RESET}) Brute-force all possible key diameters and rank results")
+    print(f"  ({YELLOW}1{RESET}) Decrypt with a specific key")
+    print(f"  ({YELLOW}2{RESET}) Try every key and rank the results")
+    print(f"{GREY}The key here is the number of grid columns (letters per turn of the strip). Some descriptions "
+          f"give the other dimension, the number of rows (turns around the rod); results show both.{RESET}")
     
     mode_choice = input(f"Enter your choice (1 or 2): {GREEN}")
     print(f"{RESET}{GREY}-{RESET}" * 60)
@@ -143,15 +145,15 @@ def run():
     if mode_choice == '1':
         while True:
             try:
-                sides = int(input(f"{RESET}Enter the key (number of sides): {GREEN}"))
+                sides = int(input(f"{RESET}Enter the key (grid columns): {GREEN}"))
                 if sides <= 1:
-                    print(f"{RED}Number of sides must be greater than 1.{RESET}")
+                    print(f"{RED}The number of columns must be greater than 1.{RESET}")
                     continue
-                
+
                 plaintext = decrypt_scytale(ciphertext, sides)
-                
+
                 print(f"\n{YELLOW}Ciphertext:{RESET} {ciphertext}")
-                print(f"{YELLOW}Key (Sides):{RESET} {sides}")
+                print(f"{YELLOW}Key:{RESET} {sides} columns, {math.ceil(len(ciphertext) / sides)} rows")
                 print(f"{YELLOW}Decrypted Text:{RESET} {plaintext}")
                 break
             except ValueError:
@@ -170,7 +172,8 @@ def run():
         print(f"{YELLOW}--- Top 10 Brute-Force Results (Best First) ---{RESET}")
         for i, result in enumerate(results[:10]):
             color = GREEN if i == 0 else ""
-            print(f"{color}Key: {result['key']:<3} | IoC: {result['ioc']:.4f} | N-gram Score: {result['bigram_score']:.2f} | Text: {result['plaintext']}{RESET}")
+            rows = math.ceil(len(result['plaintext']) / result['key'])
+            print(f"{color}Columns: {result['key']:<3} rows: {rows:<3} | IoC: {result['ioc']:.4f} | N-gram Score: {result['bigram_score']:.2f} | Text: {result['plaintext']}{RESET}")
 
         save_choice = input(f"\n{GREY}Save all {len(results)} results to a file? ({YELLOW}Y/N{RESET}): {GREEN}").upper()
         if save_choice == 'Y':

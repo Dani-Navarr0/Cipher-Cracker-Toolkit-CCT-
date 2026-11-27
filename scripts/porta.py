@@ -165,7 +165,8 @@ def run_simulated_annealing(ciphertext: str, alphabet_str: str, expected_freqs: 
     results = solve_periodic(ciphertext, alphabet, alphabet, key_length, porta_rule,
                              expected_freqs, Schedule(iterations), restarts=restarts)
     if results is None:
-        print(f"{RED}Annealing needs an alphabet that is a permutation of A-Z.{RESET}")
+        print(f"{RED}Annealing could not start: it needs letters A-Z in the ciphertext, a key length of at least 1, "
+              f"and an alphabet that is a permutation of A-Z.{RESET}")
         return []
     best_key = results[0][0]
     best_plaintext = decrypt_porta(ciphertext, best_key, alphabet_str).upper()
@@ -199,15 +200,15 @@ def run():
         elif mode == '2':
             config['use_kasiski'] = input(f"Auto-detect length with Kasiski? ({YELLOW}Y/N{RESET}): ").upper() == 'Y'
         elif mode == '3':
-            config['key_length'] = int(input("Enter exact key length: "))
-            iters = input(f"Enter iterations (default: {YELLOW}200000{RESET}): ")
-            config['iterations'] = int(iters) if iters else 200000
-            
-            t = input(f"Enter initial temperature (default: {YELLOW}1000.0{RESET}): ")
-            config['initial_temp'] = float(t) if t else 1000.0
-            
-            c = input(f"Enter cooling rate (default: {YELLOW}0.99995{RESET}): ")
-            config['cooling_rate'] = float(c) if c else 0.99995
+            try:
+                config['key_length'] = int(input("Enter exact key length: "))
+                iters = input(f"Enter iterations (default: {YELLOW}200000{RESET}): ")
+                config['iterations'] = int(iters) if iters else 200000
+            except ValueError:
+                print(f"{RED}Not a number.{RESET}")
+                return
+            # The shared engine cools from 20 to 0.1 (scripts/annealing.py); the old
+            # temperature and cooling-rate prompts were never used, so they are gone.
             
         for i, cipher in enumerate(ciphertexts):
             print(f"\n{CYAN}Processing Input #{i+1}{RESET}")

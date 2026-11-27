@@ -15,11 +15,14 @@ import subprocess
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-SOURCES = [os.path.join(HERE, "cct_native.c")]
+# Every engine is its own .c file in this folder (they share cct_common.h).
+SOURCES = sorted(os.path.join(HERE, name) for name in os.listdir(HERE) if name.endswith(".c"))
 BUILD = os.path.join(HERE, "build")
-VERSION = 1
+VERSION = 3
 LIBRARY = os.path.join(BUILD, {"win32": "cct_native.dll", "darwin": "libcct_native.dylib"}.get(sys.platform,
                                                                                              "libcct_native.so"))
+# A different library file (for example a private test build); used as is.
+LIBRARY = os.environ.get("CCT_NATIVE_LIBRARY", LIBRARY)
 MAXW, MAXCRIB, MAXP = 64, 128, 128
 HIT_FIELDS = MAXW + 4
 _lib = None
@@ -51,6 +54,7 @@ def build(verbose=True):
     subprocess.run(command, check=True)
     global _lib, _tried
     _lib, _tried = None, False
+    _functions.clear()
     return LIBRARY
 
 
@@ -66,8 +70,49 @@ def library():
         lib = ctypes.CDLL(LIBRARY)
         if lib.cct_native_version() != VERSION:
             return None
-    except OSError:
+        _register(lib)
+    except (OSError, AttributeError):    # a stale build that lacks a function counts as not built
         return None
+    _lib = lib
+    return _lib
+
+
+class NativeUnavailable(RuntimeError):
+    """The C engines are not built (menu 45, or: python scripts/native_tools.py build)."""
+
+
+MISSING_MESSAGE = ("The C engines are not built. Build them once with menu 45 (Native Engines), or:\n"
+                   "    python -m pip install ziglang\n    python scripts/native_tools.py build")
+_functions = {}
+
+
+def function(name, restype, argtypes):
+    """A C function of the library with its signature set (cached). Each engine's
+    Python wrapper declares its own functions this way. Raises NativeUnavailable
+    when the library is missing or stale (lacks the function)."""
+    cached = _functions.get(name)
+    if cached is not None:
+        return cached
+    lib = library()
+    if lib is None:
+        raise NativeUnavailable(MISSING_MESSAGE)
+    try:
+        found = getattr(lib, name)
+    except AttributeError:
+        raise NativeUnavailable(f"The C library is out of date (it lacks {name}): rebuild it with menu 45.") from None
+    found.restype = restype
+    found.argtypes = argtypes
+    _functions[name] = found
+    return found
+
+
+def require():
+    """Raise NativeUnavailable with the build instructions when the library is missing."""
+    if library() is None:
+        raise NativeUnavailable(MISSING_MESSAGE)
+
+
+def _register(lib):
     lib.cct_perm_bruteforce.restype = _i64
     lib.cct_perm_bruteforce.argtypes = [ctypes.POINTER(Layout), _P8, _i32, _i32, _P8, _i64, _P64, _P8, _P32]
     lib.cct_order_total.restype = _i64
@@ -78,8 +123,9 @@ def library():
     lib.cct_crib_columnar_periodic.restype = _i64
     lib.cct_crib_columnar_periodic.argtypes = [ctypes.POINTER(Layout), _i32, _P32, _P32, _P32, _P32, _i32, _P8,
                                                _i32, _P8, _i32, _P32, _i32, _i64, _P32, _i32, _P32, _P32]
-    _lib = lib
-    return _lib
+    # shared scoring (version 2); the other engines declare their functions through function()
+    lib.cct_ngram_total.restype = _i64
+    lib.cct_ngram_total.argtypes = [ctypes.c_char_p, _i32, ctypes.c_void_p, _i32]
 
 
 def available():

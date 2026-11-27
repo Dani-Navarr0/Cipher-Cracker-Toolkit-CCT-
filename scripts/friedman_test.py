@@ -39,7 +39,14 @@ def run():
     print(f"{GREY}-{RESET}" * 40)
     
     if isinstance(estimated_length, float):
-        print(f"{YELLOW}Estimated Key Length: {GREEN}{estimated_length:.2f}{RESET}")
-        print(f"-> You should try brute-forcing key lengths of {YELLOW}{max(1, int(estimated_length))}{RESET} or {YELLOW}{int(estimated_length) + 1}{RESET}")
+        print(f"{YELLOW}Friedman estimate of the key length: {GREEN}{estimated_length:.1f}{RESET}")
+        if ioc >= 0.06:
+            print(f"{GREY}The IoC is English-like: probably not a polyalphabetic cipher at all "
+                  f"(substitution and/or transposition).{RESET}")
+        else:
+            print(f"{GREY}This is a rough estimate: one IoC value from a finite text can be off by a factor of two "
+                  f"(measured: a 7-letter key gave 9.9 and 12.5, a 10-letter key 7.5 and 15.8, on 906- and "
+                  f"468-letter texts). Use it as an order of magnitude; "
+                  f"30 Vigenere Auto-Solver tests each key length directly.{RESET}")
     else:
-        print(f"{RED}Estimated Key Length: {estimated_length}{RESET}")
+        print(f"{RED}Estimated key length: {estimated_length}{RESET}")

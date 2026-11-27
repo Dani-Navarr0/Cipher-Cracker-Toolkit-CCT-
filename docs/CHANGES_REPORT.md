@@ -221,3 +221,115 @@ Each fix was reproduced before the change and re-tested after it.
 **Modified:** `main.py`, `README.md`, `utils/utils.py`, and 33 of the 34 existing Python files in `scripts/` (all except the empty `__init__.py`), covering the performance work, bug fixes, solver ports, and theme changes.
 
 **Tests:** run `python -m unittest discover -s tests -t .` from the repository root (20 tests).
+
+---
+
+## 8. Stage 4 (2026-11-27): Unknown Cipher Analyzer and an audit of every tool
+
+**Goal:** a user with an unknown ciphertext and no clues should be guided to the right attack, and each tool on that path should work.
+
+### 8.1 New: Unknown Cipher Analyzer (menu 39)
+
+`scripts/cipher_profile.py` (statistics and rules) and `scripts/cipher_analyzer.py` (screen). The method comes from the K4 workbench's screens: each statistic is compared with references of the same length, rather than with fixed thresholds. The references are 400 English passages, random letters, shuffled English and shuffled copies of the text.
+
+- **Output:** ranked pathways, each with the tools to open, then instant attacks, then optional parallel hill-climbing.
+- **Instant attacks:** affine/Caesar, routes, rail fence, every columnar order up to width 7, periodic keys by frequencies, autokey and Hill.
+- **Accuracy:** README, "Unknown Cipher Analyzer", has the table.
+- **Changes during development, each made after a measured failure:**
+  - **Period test.** It is Bonferroni-corrected, because about 30 periods are tested at once. Running-key texts had been flagged as periodic.
+  - **Choosing the key length.** A divisor or a multiple of the strongest period is chosen by a measured test. The tool had reported 3 for a period-6 key.
+  - **"Letter counts kept" when the letters are English.** Chi-squared alone now puts a text in this branch. A rail fence of a passage with a low IoC had been routed to the polyalphabetic branch.
+  - **Borderline IoC.** An IoC within 3 SD of the English mean keeps both branches open. Some Caesar texts had been misrouted.
+
+### 8.2 New: session ciphertext (`scripts/session.py`)
+
+- **Set once:** with `C` in the launcher, or automatically by tool 39.
+- **Offered everywhere:** every ciphertext prompt accepts Enter to use it. The prompt matcher was checked against every `input()` prompt in the toolkit.
+- **Multi-line paste:** a paste into a ciphertext prompt is collected whole instead of spilling into the next prompts.
+  - **Untested:** this paste detection reads the console input buffer, so it cannot be tested with piped input. It was not tested in a real console.
+
+### 8.3 Audit
+
+Three independent read-only audits covered every module, and each reported finding came with a reproduction. Findings fixed (tests in `tests/test_audit_fixes.py`):
+
+| Tool | Problem (reproduced) | Fix | Check after the fix |
+|---|---|---|---|
+| 22 Rail fence | Kept spaces, so grouped ciphertext decrypted wrongly. A `*` in the text corrupted the output. No ranking or offsets, and a 20-rail cap. | Rewritten. A permutation replaces the marker characters, and every rail count 2-40 × every offset × both directions is ranked by n-grams. | The audit's grouped example ranks first. Round trips pass with offsets and `*`. |
+| 23 Matrix Permutation | Refused prime lengths. Mishandled non-A-Z letters. Layout numbers differed from 32/37. One prompt per width and no time estimate. | Any width allowed, letters A-Z only, layouts numbered as in 32/37. One brute-force limit, a time estimate before starting, keys also printed in tool-20 form. | A 397-letter (prime) columnar is solved. |
+| 20 Columnar | Exhaustive search kept every result (368 MB at width 9). Keys from 23/32/37/38 could not be entered. Only one layout in direct decrypt. | Workers enumerate their own orders and keep the top 200. `transposition_core.parse_column_key` accepts keywords, digit keys and printed read orders. Direct decrypt offers all four layouts. | Width 9: 9.8 MB in the parent, 5.3 s (parallel), correct key. Every key form gives the same order. |
+| 38 Known-plaintext columnar | The recovered key was never shown. A reversed range (`8-2`) crashed. Huge searches started without warning. | Key shown as letters (`?` = not fixed). Ranges accepted in either order. Confirmation above 50 million orders. | Planted key `KEY` is displayed. |
+| 21 Scytale | The key was called "sides" but is the number of columns. | Labelled as columns, with the row count shown too. | — |
+| Launcher | At 120×30 the menu fell back to one scrolling column: 20 entries visible, "↓ 27 more" (the audit's render). | System entries moved to hotkeys. Two columns from 88 columns wide, three from 132. | All tools visible at 100×30, 120×30 and 140×30 (rendered with a mocked terminal size). |
+| 9 Playfair | Every plaintext printed 50 times. No working keyless attack: memetic 9-15% of letters correct. | Print fixed. New `playfair_anneal.py` (square annealing, parallel runs, agreement count) as mode `A`, and as a hill-climb in tool 39. | 304 letters, 1,000,000 steps per run: 2 of 8 runs found the key at start temperature 8, 1 of 8 at 20. Failed runs stall at about half the true key's fitness. 8 runs per setting is too few to rank the two settings. |
+| 5 Hill | The known-plaintext attack crashed on a misaligned crib, or printed "Success!" with a wrong key. IoC prompts had no effect. No 3x3 attack without known plaintext. | New ciphertext-only row attack for 2x2 and 3x3 (each key row scored alone by letter frequencies). Known-plaintext attack for any crib, position known or unknown, cross-checked against every crib block. Unusable cribs explained. IoC prompts removed. Encrypt mode. | 3x3 solved from 150 and 300 letters (0.9 s and 1.8 s). Known-plaintext with unknown position finds the key, 7 of 7 blocks confirmed. |
+| 4 Autoclave | Dictionary attack discarded the key when the plaintext IoC was outside 0.065-0.070. No direct decrypt. Vigenère plaintext autokey only. | Rewritten. Primer-free attack: ciphertext autokey decrypts directly past the primer, and plaintext autokey splits into chains with 26 choices each. Plaintext and ciphertext autokey, both tableaux, decrypt, encrypt, and an n-gram-ranked dictionary mode. Added to tool 39's instant attacks. | Plaintext autokey: 4 of 4 planted texts fully recovered, 0.8-1.6 s. Ciphertext autokey: right primer length, 92-98% of letters (the misses are primer letters). |
+| 6 XOR, 7 Modular | IoC filter discarded the correct key, and results were ranked by IoC. Modular advanced the key on spaces and read a space in the key as a shift. | Keep the top 25 by n-gram cost outside the IoC window and rank by n-gram cost. Key advances on letters only, and non-letters are dropped from the key. | Key LANTERN ranked first in both. `HELLO WORLD` + `AB` = `HFLMO XOSLE`. |
+| 3 Gronsfeld | Exhaustive search kept every key's result in memory. The audit measured 81 MB at length 5 and extrapolated about 8 GB at 7. | Workers generate their own key ranges and keep the best 50. | 100,000 keys: 50 kept, 23.8 MB, the planted key ranked first. |
+| 30 Vigenère auto-solver | "CRACK SUCCESSFUL" on random text. Periods 1-20 only. | Key length from the corrected column-IoC test. Vigenère and Beaufort. Verdict against same-length English. Maximum period chosen by the user. | Key LIGHTHOUSE recovered. Random letters: "not solved". |
+| 34 Crib drag | Vigenère only, and 400+ unranked rows. | Vigenère, Beaufort and Variant Beaufort. Ranked by how English the key fragment looks. Fragments that repeat with a period are listed. | Running key: true position 4th of 1,077. KRYPTOS key: true position first among repeating fragments, period 7. |
+| 33 Word pattern | First 15 matches shown alphabetically. No cross-word consistency. | Joint beam search with one-to-one letters, plus 4 substitution-annealer runs, ranked by the share of dictionary words. | 3 of 4 test sentences solved (79/79, 79/81 with DOG/GOD ambiguous, 94/94). The 51-letter sentence failed. |
+| 15 Four-square | J was dropped from the ciphertext, shifting every digraph after it. | J → I. | — |
+| 36 Friedman, 40 IoC, 41 Frequency | Overconfident advice. Output printed before the empty-input check. | Estimates worded as rough, with measured errors quoted. Input checked first. | Friedman measured: 7-letter key estimated as 9.9 and 12.5, 10-letter key as 7.5 and 15.8. |
+| 14 Porta, 13 Beaufort, 3 Gronsfeld, 2 Gromark | Porta asked for a temperature and cooling rate it ignored. A misleading "alphabet" error. Gromark silently accepted a primer that was not 5 digits. | Prompts removed, error message corrected, primer validated. | — |
+
+### 8.4 Not done (open)
+
+- **Four-square annealing speed:** about 3 minutes per run (audit measurement). Not changed.
+- **Vigenère (tool 1) annealing:** not seeded with the frequency key. The default budget is about 165 s per key length (audit measurement). Tools 30 and 39 now give the frequency solution instantly.
+- **Bifid:** no key search, and no period option.
+- **Inputs:** Caesar and affine score texts under 5 letters as "inf". `float(input())` is unguarded in Vigenère and Beaufort mode 2.
+- **Matrix Generator:** gives nothing useful on prime lengths.
+- **Playfair annealer:** its success rate was measured on one 304-letter text only.
+
+### 8.5 C-engine prompt and the KRYPTOS tableau
+
+- **C-engine notice:** the launcher header says "C engines not built: 45" while they are missing.
+- **Build offer:** tools 23, 32 and 38, which have C engines, say so before running in Python and offer to build them on the spot (`B`). The quoted speed-ups are the README's measured ones.
+- **KRYPTOS tableau in tool 39:** the instant periodic attack also tries Vigenère and Beaufort on the KRYPTOS-keyed tableau (`cipher_profile.KEYED_ALPHABETS`). On Paradigm CTF PK1, which is Vigenère on the KRYPTOS alphabet, it recovers the key PROVENANCE and the plaintext instantly.
+
+### 8.6 Speed (C) and new solvers
+
+**Profile first.** In a substitution + transposition annealing run, `ngram_total` took 1.76 of 2.36 s (75%); decryption took 0.07 s. So instead of porting every module to C, the n-gram total was ported and is selected automatically by `ngram_scoring` when the library is built. Results are unchanged: a run with the same seed gives the same score with and without C.
+
+| What | Before | After |
+|---|---|---|
+| `ngram_total`, 300 letters | 16.4 µs | 3.4 µs (about 1 µs of it is the ctypes call) |
+| Annealing step, substitution + transposition | 40.1 µs | 10.8 µs |
+| Annealing step, Vigenère | 50.4 µs | 17.1 µs |
+| Four-square annealing step | 176 µs (audit measurement) | 22 µs |
+| Quagmire I-III over 341,591 dictionary alphabets, period 6 | 56 s (first version, one process) | 8.8 s |
+
+**New C kernels** (library version 3, `scripts/native/fast.py`):
+- n-gram total;
+- keyed-alphabet chi-squared fit;
+- Gromark primer screen;
+- Bifid/Trifid decryption;
+- Four-square decryption.
+
+Each has a Python reference, and `tests/test_new_solvers.py` requires identical results. A library missing a function now counts as "not built" instead of raising.
+
+**New tools:**
+- 17 Quagmire (keyword alphabets);
+- 18 Bifid / Trifid solver;
+- 19 Gromark solver;
+- 24 Routes & Irregular, using transposition families ported from the K4 workbench (one change: `tuple(src)` instead of `bytes(src)` for texts over 255 letters).
+
+**Tool 39 (analyzer):**
+- With a key length found, its instant attacks now include the dictionary Quagmire search.
+- With the C engines, the exhaustive columnar search goes to width 8.
+
+**Measured on planted texts:**
+
+| Solver | Text | Result |
+|---|---|---|
+| Quagmire | LIGHTHOUSE alphabet, Quagmire I, II and III | All three recovered. |
+| Routes & Irregular | Width-12 spiral, TOMATO Myszkowski, BALLOONS AMSCO | All three found. |
+| Gromark | 250 and 400 letters | 4 of 4 solved. |
+| Gromark | 150 letters | 1 of 2. |
+| Four-square | 300 letters, 8 runs of 1,000,000 steps | 2 of 8 runs solved, 48 s in all. |
+
+The Gromark screen alone ranked the true primer only 129th-1,051st of 100,000. That is why the best 3,000 primers are refined: given the right primer, refining recovered 100% of the plaintext.
+
+### 8.7 Tests
+
+`python -m unittest discover -s tests -t .` runs 64 tests: 28 from earlier stages, 12 for the analyzer, 16 for the audit fixes and 8 for the new solvers and C kernels. With the C library built, all 64 run (about 100 s). Without it, the 10 native tests (6 earlier, 4 new) are skipped.

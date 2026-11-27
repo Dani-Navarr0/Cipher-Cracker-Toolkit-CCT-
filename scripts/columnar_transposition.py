@@ -1,3 +1,4 @@
+import heapq
 import os
 import math
 import re
@@ -112,8 +113,43 @@ def _decrypt_columnar_grid(ciphertext: str, key: str) -> str:
                 cipher_index += 1
     return ''.join([''.join(row) for row in grid])
 
+KEEP_PER_BATCH = 200
+
+
+def _trim(results, required_words):
+    """Keep results containing every required word, plus the best KEEP_PER_BATCH
+    by n-gram cost: memory stays flat however many keys are tested."""
+    if len(results) <= KEEP_PER_BATCH:
+        return results
+    matching = [r for r in results if required_words
+                and all(word.lower() in r['plaintext'].lower() for word in required_words)]
+    return matching + heapq.nsmallest(KEEP_PER_BATCH, results, key=lambda r: r['bigram_score'])
+
+
+def process_prefix_batch(args):
+    """Every column order of ``width`` that starts with ``prefix`` (generated
+    here, so the parent never builds the full list of width! keys)."""
+    ciphertext, width, prefix, expected_freqs, required_words = args
+    decrypt = make_decryptor(ciphertext, width, "write_rows_read_cols")
+    rest = [column for column in range(width) if column not in prefix]
+    best = []
+    for tail in permutations(rest):
+        order = prefix + tail
+        decrypted = decrypt(order).decode("latin-1")
+        score = calculate_bigram_score(decrypted, expected_freqs)
+        result = {'key': order_to_key(order), 'plaintext': decrypted, 'ioc': None, 'bigram_score': score}
+        best.append(result)
+        if len(best) >= 4 * KEEP_PER_BATCH:
+            best = _trim(best, required_words)
+    best = _trim(best, required_words)
+    for result in best:
+        result['ioc'] = calculate_ioc(result['plaintext'])
+    return best
+
+
 def process_key_batch(args):
-    keys, ciphertext, expected_freqs = args
+    keys, ciphertext, expected_freqs = args[:3]
+    required_words = args[3] if len(args) > 3 else []
     results = []
     evaluated = {}
     decryptors = {}
@@ -136,17 +172,20 @@ def process_key_batch(args):
             'ioc': ioc,
             'bigram_score': bigram_score
         })
-    return results
+        if len(results) >= 4 * KEEP_PER_BATCH:
+            results = _trim(results, required_words)
+    return _trim(results, required_words)
 
-def parallel_process_keys(keys: List[str], ciphertext: str, expected_freqs: Dict) -> List[Dict]:
+def parallel_process_keys(keys: List[str], ciphertext: str, expected_freqs: Dict, required_words=()) -> List[Dict]:
     all_results = []
+    required_words = list(required_words)
     num_processes = max(1, os.cpu_count() - 1)
     if len(keys) < PARALLEL_THRESHOLD or num_processes == 1:
         print(f"Processing {YELLOW}{len(keys):,}{RESET} keys in a single process.")
-        return process_key_batch((keys, ciphertext, expected_freqs))
+        return process_key_batch((keys, ciphertext, expected_freqs, required_words))
     batch_size = max(1, len(keys) // (num_processes * 4))
-    
-    tasks = [(keys[i:i + batch_size], ciphertext, expected_freqs) for i in range(0, len(keys), batch_size)]
+
+    tasks = [(keys[i:i + batch_size], ciphertext, expected_freqs, required_words) for i in range(0, len(keys), batch_size)]
     total_batches = len(tasks)
 
     print(f"Processing {YELLOW}{len(keys):,}{RESET} keys in {YELLOW}{total_batches:,}{RESET} batches using {YELLOW}{num_processes}{RESET} processes.")
@@ -171,13 +210,35 @@ def highlight_phrases(text: str, phrases: List[str]) -> str:
     pattern = "|".join(re.escape(phrase) for phrase in phrases)
     return re.sub(f'({pattern})', f'{RED}\\1{RESET}', text, flags=re.IGNORECASE)
 
-def run_bruteforce(keys_to_test: List[str], ciphertext: str, required_words: List[str]):
-    if not keys_to_test:
+def exhaustive_results(ciphertext: str, width: int, required_words: List[str]) -> List[Dict]:
+    """Every column order of ``width``, in parallel, one task per pair of leading columns."""
+    expected_freqs = load_bigram_frequencies(ngram_path)
+    prefixes = [(a,) for a in range(width)] if width <= 7 else [(a, b) for a in range(width) for b in range(width) if a != b]
+    tasks = [(ciphertext, width, prefix, expected_freqs, list(required_words)) for prefix in prefixes]
+    workers = max(1, (os.cpu_count() or 2) - 1)
+    results = []
+    if width <= 7 or workers == 1:
+        for task in tasks:
+            results += process_prefix_batch(task)
+        return results
+    print(f"Testing {YELLOW}{math.factorial(width):,}{RESET} column orders in {len(tasks)} tasks on {workers} processes.")
+    with ProcessPoolExecutor(max_workers=workers) as executor:
+        futures = [executor.submit(process_prefix_batch, task) for task in tasks]
+        for done, future in enumerate(as_completed(futures), start=1):
+            results += future.result()
+            print(f"Progress: {done}/{len(tasks)} ({done / len(tasks):.0%})", end='\r')
+    print()
+    return results
+
+
+def run_bruteforce(keys_to_test: List[str], ciphertext: str, required_words: List[str], precomputed=None):
+    if not keys_to_test and precomputed is None:
         print(f"{RED}No keys to test based on the criteria.{RESET}")
         return
 
     expected_freqs = load_bigram_frequencies(ngram_path)
-    all_results = parallel_process_keys(keys_to_test, ciphertext, expected_freqs)
+    all_results = precomputed if precomputed is not None else parallel_process_keys(
+        keys_to_test, ciphertext, expected_freqs, required_words)
 
     if all_results:
         all_results.sort(key=lambda x: (
@@ -235,33 +296,43 @@ def exhaustive_attack():
             return
         
         num_perms = math.factorial(key_len)
-        print(f"Generating {YELLOW}{num_perms:,}{RESET} permutations for key length {key_len}...")
+        print(f"Testing {YELLOW}{num_perms:,}{RESET} column orders for key length {key_len}...")
         if key_len > 10:
-            if input(f"{YELLOW}Warning: This will be very slow. Continue? (Y/N): {RESET}").upper() != 'Y': return
-        
-        cols = "0123456789AB"[:key_len]
-        keys_to_test = ["".join(p) for p in permutations(cols)]
-        run_bruteforce(keys_to_test, ciphertext, required_words)
+            if input(f"{YELLOW}Warning: this takes hours in Python (about 40 million orders for width 11). "
+                     f"Tool 23 has a C engine for this search. Continue? (Y/N): {RESET}").upper() != 'Y': return
+
+        ciphertext = "".join(ch for ch in ciphertext if "A" <= ch <= "Z")
+        run_bruteforce([], ciphertext, required_words,
+                       precomputed=exhaustive_results(ciphertext, key_len, required_words))
 
     except ValueError:
         print(f"{RED}Invalid number.{RESET}")
 
 def direct_decrypt():
     print(f"\n{BLUE}--- Direct Decrypt ---{RESET}")
-    ciphertext = input("Enter ciphertext: ").upper().replace(" ", "")
-    key = input("Enter key (e.g., 'SECRET' or '512634'): ").upper()
+    from transposition_core import order_to_keyword, parse_column_key
+    from layered import TRANSPOSITION_MODES
+    ciphertext = "".join(ch for ch in input("Enter ciphertext: ").upper() if "A" <= ch <= "Z")
+    print(f"{GREY}Key: a keyword ('ZEBRAS'), a digit key ('521304'), or a read order as other tools print it "
+          f"('[4, 2, 1, 3, 5, 0]' or '4 2 1 3 5 0').{RESET}")
+    key_text = input("Enter key: ")
+    order = parse_column_key(key_text)
+    if not order or len(order) >= len(ciphertext):
+        print(f"{RED}Could not read a column key from '{key_text}'.{RESET}")
+        return
+    modes = list(TRANSPOSITION_MODES)
+    for index, mode in enumerate(modes, start=1):
+        print(f"  [{index}] {TRANSPOSITION_MODES[mode]}{' (default)' if index == 1 else ''}")
+    choice = input("Layout (Enter = 1): ").strip()
+    mode = modes[int(choice) - 1] if choice.isdigit() and 1 <= int(choice) <= 4 else modes[0]
     required_words_input = input("Enter plaintext words to highlight (comma-separated, optional): ")
     required_words = [word.strip() for word in required_words_input.split(",")] if required_words_input else []
-    
-    if not key:
-        print(f"{RED}Key cannot be empty.{RESET}")
-        return
 
-    plaintext = decrypt_columnar_transposition(ciphertext, key)
+    plaintext = make_decryptor(ciphertext, len(order), mode)(order).decode("latin-1")
     highlighted_plaintext = highlight_phrases(plaintext, required_words)
-    
+
     print(f"\n{GREY}---------------------------------{RESET}")
-    print(f"Key: {YELLOW}{key}{RESET}")
+    print(f"Read order: {YELLOW}{order}{RESET} | as a key: {YELLOW}{order_to_keyword(order)}{RESET} | {TRANSPOSITION_MODES[mode]}")
     print(f"Plaintext: {GREEN}{highlighted_plaintext}{RESET}")
     print(f"{GREY}---------------------------------{RESET}")
 

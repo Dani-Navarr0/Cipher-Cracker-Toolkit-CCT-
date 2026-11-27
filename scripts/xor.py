@@ -1,7 +1,11 @@
 import os
 import datetime
+import heapq
 import re
 from utils import utils
+from ngram_scoring import load_ngram_scores, score_text
+
+KEEP_OUTSIDE_WINDOW = 25
 
 # ANSI color codes for terminal output
 from theme import RED, GREEN, YELLOW, BLUE, CYAN, GREY, WHITE, RESET, banner
@@ -75,10 +79,13 @@ def brute_force_with_ioc(ciphertext, min_ioc=0.065, max_ioc=0.07, perform_freq_a
         return []
     
     results = []
+    outside, costs = [], {}
+    model = load_ngram_scores()
     total_words = len(words)
-    
+
     print(f"\n{YELLOW}Starting brute force with {total_words} words...{RESET}")
-    print(f"\n-{GREY}IoC filter range: {min_ioc} to {max_ioc}{RESET}")
+    print(f"\n-{GREY}IoC filter range: {min_ioc} to {max_ioc} (plus the {KEEP_OUTSIDE_WINDOW} most English-like "
+          f"results outside it; ranked by n-gram cost){RESET}")
     if perform_freq_analysis:
         print(f"-{GREY}Frequency analysis will be performed (threshold: {freq_threshold}){RESET}")
     
@@ -103,7 +110,9 @@ def brute_force_with_ioc(ciphertext, min_ioc=0.065, max_ioc=0.07, perform_freq_a
         
         # Calculate IoC
         ioc_ascii = utils.calculate_ioc(ascii_result)
-            
+        cost = score_text(ascii_result, model)
+        costs[test_word] = cost
+
         # Check result against IoC range
         if min_ioc <= ioc_ascii <= max_ioc and len(ascii_result.strip()) > 0:
             if perform_freq_analysis:
@@ -112,15 +121,21 @@ def brute_force_with_ioc(ciphertext, min_ioc=0.065, max_ioc=0.07, perform_freq_a
                     results.append((test_word, "ASCII", ascii_result, ioc_ascii, freq_analysis, likeness_score))
             else:
                 results.append((test_word, "ASCII", ascii_result, ioc_ascii, "", float('inf')))
-    
+        elif ascii_result.strip():
+            # Keep the most English-like results outside the IoC window too.
+            heapq.heappush(outside, (-cost, words_checked, (test_word, "ASCII", ascii_result, ioc_ascii, "", float('inf'))))
+            if len(outside) > KEEP_OUTSIDE_WINDOW:
+                heapq.heappop(outside)
+
     print(f"{GREY}Completed! {total_words} words checked.{RESET}                ")
-    
-    # Sort results - first by frequency analysis score if available, then by IoC
+    results += [entry for _, _, entry in outside]
+
+    # Frequency-analysis score first if requested, then n-gram cost (lower = more English).
     if perform_freq_analysis:
-        results.sort(key=lambda x: (x[5], -x[3]))  # Sort by likeness score, then by IoC (descending)
+        results.sort(key=lambda x: (x[5], costs.get(x[0], 255)))
     else:
-        results.sort(key=lambda x: x[3], reverse=True)  # Sort by IoC
-        
+        results.sort(key=lambda x: costs.get(x[0], 255))
+
     return results
 
 def run():

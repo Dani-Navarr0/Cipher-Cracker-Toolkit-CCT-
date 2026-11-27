@@ -446,8 +446,13 @@ def run():
     # 3. Main Action Loop
     while True:
         print(f"\n{GREY}Current Ciphertext: {RESET}{ciphertext[:40]}...")
-        mode = input(f"Choose a mode:\n({YELLOW}1{RESET}) Brute Force w/ Crib\n({YELLOW}2{RESET}) Direct Decrypt\n({YELLOW}3{RESET}) Dictionary Attack (N-gram Fitness)\n({YELLOW}4{RESET}) Memetic Algorithm Attack\n({YELLOW}N{RESET}) Enter New Ciphertext\n({YELLOW}Q{RESET}) Quit to Main Menu\n{GREY}Selection: {RESET}").upper()
-        
+        mode = input(f"Choose a mode:\n({YELLOW}A{RESET}) Annealing: no key or word list needed {GREY}(recommended; 5x5, J=I){RESET}\n({YELLOW}1{RESET}) Brute Force w/ Crib\n({YELLOW}2{RESET}) Direct Decrypt\n({YELLOW}3{RESET}) Dictionary Attack (N-gram Fitness)\n({YELLOW}4{RESET}) Memetic Algorithm Attack {GREY}(older; measured weak without a dictionary key){RESET}\n({YELLOW}N{RESET}) Enter New Ciphertext\n({YELLOW}Q{RESET}) Quit to Main Menu\n{GREY}Selection: {RESET}").upper()
+
+        if mode == 'A':
+            import playfair_anneal
+            playfair_anneal.attack_interactive(ciphertext)
+            continue
+
         if mode == 'Q':
             print(f"{YELLOW}Returning to main menu...{RESET}")
             break
@@ -470,7 +475,8 @@ def run():
                 print(f"\n{YELLOW}BEST SOLUTION FOUND{RESET}")
                 print(f"{GREY}-{RESET}" * 50)
                 print(f"Key: {YELLOW}{best_result['key']}{RESET} | IoC: {YELLOW}{best_result.get('ioc', 0.0):.6f}{RESET} | Score: {YELLOW}{best_result['score']:.2f}{RESET}")
-                print(f"Plaintext: {best_result['plaintext']}\n{GREY}-{RESET}" * 50)
+                print(f"Plaintext: {best_result['plaintext']}")
+                print(f"{GREY}-{RESET}" * 50)
 
                 save_results = input(f"\nSave all {len(results)} UNIQUE results to file? ({YELLOW}Y/N{RESET}): ").upper() == 'Y'
                 if save_results:
@@ -527,7 +533,8 @@ def run():
                 print(f"{GREY}-{RESET}" * 50)
                 print(f"Key: {YELLOW}{best_phrase['key']}{RESET} | IoC: {YELLOW}{best_phrase['ioc']:.6f}{RESET} | Score: {YELLOW}{best_phrase['score']:.2f}{RESET}")
                 print(f"Matched phrases: {YELLOW}{', '.join(best_phrase['matched_phrases'])}{RESET}")
-                print(f"Plaintext: {highlight_match(best_phrase['plaintext'], best_phrase['matched_phrases'])}\n{GREY}-{RESET}" * 50)
+                print(f"Plaintext: {highlight_match(best_phrase['plaintext'], best_phrase['matched_phrases'])}")
+                print(f"{GREY}-{RESET}" * 50)
 
                 save_phrase = input(f"\nSave all {len(phrase_results)} UNIQUE phrase-matching results to file? ({YELLOW}Y/N{RESET}): ").upper() == 'Y'
                 if save_phrase:
@@ -539,7 +546,8 @@ def run():
                 print(f"\n{YELLOW}BEST ENGLISH-LIKE IoC RESULT{RESET}")
                 print(f"{GREY}-{RESET}" * 50)
                 print(f"Key: {YELLOW}{best_ioc['key']}{RESET} | IoC: {YELLOW}{best_ioc['ioc']:.6f}{RESET} | Score: {YELLOW}{best_ioc['score']:.2f}{RESET}")
-                print(f"Plaintext: {best_ioc['plaintext']}\n{GREY}-{RESET}" * 50)
+                print(f"Plaintext: {best_ioc['plaintext']}")
+                print(f"{GREY}-{RESET}" * 50)
 
                 save_ioc = input(f"\nSave all {len(ioc_results)} UNIQUE IoC-based results to file? ({YELLOW}Y/N{RESET}): ").upper() == 'Y'
                 if save_ioc:
